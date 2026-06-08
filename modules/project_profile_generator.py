@@ -26,6 +26,7 @@ LOW_PRIORITY_TAGS = {"clicker", "idler", "incremental"}
 class ProjectProfile:
     basic_info: dict[str, str]
     core_gameplay_judgment: str
+    data_quality_level: str = "low"
     quick_summary: dict[str, Any] = field(default_factory=dict)
     selling_points: list[str] = field(default_factory=list)
     competition_points: list[str] = field(default_factory=list)
@@ -109,6 +110,7 @@ def generate_project_profile(
     competition_points = competition_dimensions
     china_opportunities, opportunity_score = _build_china_opportunities(info, all_tags)
     risks = _build_risks(info, all_tags, description_text)
+    data_quality_level = _assess_data_quality(info, all_tags, user_demo_played)
     next_action = _choose_next_action(info, risks, opportunity_score)
     backup_next_action = _choose_backup_next_action(info, next_action, risks, opportunity_score)
     search_keywords = build_profile_search_keywords(info, all_tags, user_keywords)
@@ -128,6 +130,7 @@ def generate_project_profile(
     return ProjectProfile(
         basic_info=basic_info,
         core_gameplay_judgment=core_judgment,
+        data_quality_level=data_quality_level,
         quick_summary=quick_summary,
         selling_points=selling_points,
         competition_points=competition_points,
@@ -147,8 +150,8 @@ def generate_project_profile(
         ],
         search_keywords=search_keywords,
         source_limitations=[
-            "仅使用 Steam 商店公开信息和用户补充关键词生成。",
-            "未接入 AI API、Steam 评论工具、销量估算或社区声量抓取。",
+            "基于 Steam 商店公开信息和 Steam 评测样本。",
+            "Steam 评测游玩时间只取 1 页样本，不代表全体玩家。",
             "标签、Demo、语言等字段可能受 Steam 页面展示和地区语言影响，需要人工复核。",
             FINAL_LIMITATION_TEXT,
         ],
@@ -186,49 +189,107 @@ def build_profile_search_keywords(store_info: dict, tags: list[str] | None = Non
     return keywords[:24]
 
 
+def _assess_data_quality(info: dict, tags: list[str], user_demo_played: str = "") -> str:
+    has_name = _has_value(info.get("name")) or _has_value(info.get("game_name"))
+    has_party = _has_value(info.get("developer")) or _has_value(info.get("publisher"))
+    has_tags = bool(tags)
+    has_media = _to_int(info.get("screenshots_count")) > 0 or _to_int(info.get("movies_count")) > 0
+    has_reviews = _to_int(info.get("review_total")) >= 10
+    has_demo_signal = str(info.get("has_demo", "") or "").strip() == "是"
+    has_played_signal = str(user_demo_played or "").strip() == "已试玩"
+
+    if has_name and has_party and has_tags and has_media and (has_reviews or has_demo_signal or has_played_signal):
+        return "high"
+    if has_name and has_party and has_tags and has_media:
+        return "medium"
+    return "low"
+
+
+def _markdown_quick_screening(profile: ProjectProfile) -> str:
+    level = profile.data_quality_level or "low"
+    has_reviews = _to_int((profile.raw_store_info or {}).get("review_total")) >= 10
+    if level == "low":
+        return "\n".join(
+            [
+                "- 数据不足：缺少游戏名、类型、截图/视频等核心信息，或只有少量 Steam 字段。",
+                "- 当前只能做记录，不能做发行判断。",
+                "- 下一步动作：补商店截图、视频、Demo、评测或社区声量。",
+            ]
+        )
+
+    if level == "medium":
+        return "\n".join(
+            [
+                f"- 类型定位：{_quick_text(profile, '游戏类型 / 赛道定位')}",
+                f"- 卖点一句话：{_first_or_placeholder(profile.quick_summary.get('主卖点', []))}",
+                "- 当前信息不足以判断商业潜力。",
+                "- 最大风险：缺少评测/游玩时长/社区声量。",
+                "- 下一步动作：先看 Trailer / Demo / B站小黑盒声量。",
+            ]
+        )
+
+    lines = [
+        f"- 类型定位：{_quick_text(profile, '游戏类型 / 赛道定位')}",
+        f"- 卖点一句话：{_first_or_placeholder(profile.quick_summary.get('主卖点', []))}",
+    ]
+    if has_reviews:
+        lines.extend(
+            [
+                f"- 好评率 / 评测数：{profile.basic_info.get('好评率', PLACEHOLDER)} / {profile.basic_info.get('评测数', PLACEHOLDER)}",
+                f"- 中位 / 平均游玩：{profile.basic_info.get('中位游玩时间', PLACEHOLDER)} / {profile.basic_info.get('平均游玩时间', PLACEHOLDER)}",
+            ]
+        )
+    else:
+        lines.append("- 暂无 Steam 评测数据，无法判断口碑和游玩时长。")
+    lines.extend(
+        [
+            f"- 最大风险：{_first_or_placeholder(profile.quick_summary.get('主要风险', []))}",
+            f"- 建议下一步：{profile.next_action or PLACEHOLDER}",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def profile_to_markdown(profile: ProjectProfile) -> str:
     game_name = profile.basic_info.get("游戏名", PLACEHOLDER)
+    info = profile.raw_store_info or {}
+    tags = profile.basic_info.get("类型/标签", PLACEHOLDER)
+    data_quality_level = profile.data_quality_level or "low"
+    data_quality_note = ""
+    if data_quality_level != "high":
+        data_quality_note = "\n当前信息不足，仅生成初筛记录，不构成发行判断。\n"
+    quick_section = _markdown_quick_screening(profile)
     return f"""# {game_name} 项目画像草稿
-
-## 0. 快速结论
-- 游戏类型 / 赛道定位：{_quick_text(profile, "游戏类型 / 赛道定位")}
-- 竞品锚点 / 相似参考：{_join_or_placeholder(profile.quick_summary.get("竞品锚点 / 相似参考", []))}
-- 主卖点：{_first_or_placeholder(profile.quick_summary.get("主卖点", []))}
-- 最大风险：{_first_or_placeholder(profile.quick_summary.get("主要风险", []))}
-- 建议下一步：{profile.next_action or PLACEHOLDER}；备用：{profile.backup_next_action or PLACEHOLDER}
+{data_quality_note}
+## 0. 快速初筛
+{quick_section}
 
 ## 1. 基础信息
-{_dict_to_bullets(profile.basic_info)}
+- 游戏名：{profile.basic_info.get("游戏名", PLACEHOLDER)}
+- AppID：{profile.basic_info.get("AppID", PLACEHOLDER)}
+- Steam 链接：{profile.basic_info.get("Steam 链接", PLACEHOLDER)}
+- 开发商：{profile.basic_info.get("开发商", PLACEHOLDER)}
+- 发行商：{profile.basic_info.get("发行商", PLACEHOLDER)}
+- 发售状态：{profile.basic_info.get("发售状态", PLACEHOLDER)}
+- 价格：{profile.basic_info.get("价格", PLACEHOLDER)}
+- Demo：{profile.basic_info.get("是否有 Demo", PLACEHOLDER)}
+- 简中：{profile.basic_info.get("是否支持简中", PLACEHOLDER)}
+- 类型/标签：{tags}
 
-## 2. 卖点摘要
-{_list_to_bullets(_compact_items(profile.quick_summary.get("主卖点", profile.selling_points), 5, 42))}
+## 2. 商店素材
+- 截图数量：{profile.basic_info.get("截图数量", PLACEHOLDER)}
+- 视频数量：{profile.basic_info.get("视频/Trailer 数量", PLACEHOLDER)}
+- 短描述：{_value(info.get("short_description"))}
 
-## 3. 竞品锚点与比较维度
+## 3. 人工确认项
+- Demo 前 15 分钟是否抓人
+- 是否已有发行/区域代理
+- 核心循环是否成立
+- 中文区玩家是否可能有兴趣
 
-### 竞品锚点 / 相似参考
-{_list_to_bullets(profile.competitor_anchors)}
-
-### 竞品比较维度
-{_list_to_bullets(profile.competition_dimensions)}
-
-## 4. 中国区机会
-{_list_to_bullets(_compact_items(profile.quick_summary.get("中国区机会", profile.china_opportunities), 5, 42))}
-
-## 5. 主要风险
-{_list_to_bullets(_compact_items(profile.quick_summary.get("主要风险", profile.risks), 5, 42))}
-
-## 6. 建议下一步
-- 主建议：{profile.next_action or PLACEHOLDER}
-- 备用建议：{profile.backup_next_action or PLACEHOLDER}
-
-## 7. 人工确认清单
-{_list_to_bullets(profile.manual_checklist)}
-
-## 8. 信息来源与限制
-- 类型信号来源：{_join_or_placeholder(profile.genre_signals.get("signal_sources", []))}
-- 外部标题线索：{_join_or_placeholder(profile.external_title_clues)}
-- 竞品锚点 / 相似参考：{_join_or_placeholder(profile.competitor_anchors)}
-{_list_to_bullets(profile.source_limitations)}
+## 4. 信息限制
+- 基于 Steam 商店公开信息和 Steam 评测样本
+- 需试玩复核
 """
 
 
@@ -357,32 +418,23 @@ def _build_competition_dimensions(genre_signals: GenreSignals) -> list[str]:
 def _build_china_opportunities(info: dict, tags: list[str]) -> tuple[list[str], int]:
     opportunities = []
     score = 0
-    developer = str(info.get("developer", "") or "").strip()
-    publisher = str(info.get("publisher", "") or "").strip()
-    release_status = str(info.get("release_status", "") or "").casefold()
     has_chinese = str(info.get("has_simplified_chinese", "") or "").strip()
     has_demo = str(info.get("has_demo", "") or "").strip()
 
-    if not publisher or (developer and publisher.casefold() == developer.casefold()):
-        score += 1
-        opportunities.append("可能存在发行沟通空间，需要确认是否为开发商自发行或发行商空缺。")
     if has_chinese == "否":
-        score += 1
-        opportunities.append("当前未判断到简中支持，可能存在本地化服务和中文区转化提升空间。")
+        opportunities.append("暂未发现简中支持，需人工确认中文区进入门槛。")
     elif has_chinese == "是":
-        opportunities.append("已判断支持简中，可优先检查本地化质量和中文社区接受度。")
+        score += 1
+        opportunities.append("已显示支持简中，可检查本地化质量和中文社区反馈。")
     else:
         opportunities.append("简中支持状态未获取，需要人工确认。")
     if has_demo == "是":
-        opportunities.append("已有 Demo，可用试玩反馈快速判断中国区转化潜力。")
+        score += 1
+        opportunities.append("已有 Demo，可先用试玩反馈验证中文区兴趣。")
     else:
         opportunities.append("Demo 状态未确认或暂未发现，需确认是否有试玩版本。")
-    if "coming soon" in release_status or "未发售" in release_status or "即将" in release_status:
-        score += 1
-        opportunities.append("项目处于未发售/即将推出阶段，可能仍有愿望单、PR 和发行协作窗口。")
     if _has_any(tags, ["roguelite", "roguelike", "strategy", "simulation", "metroidvania", "survival", "action"]):
-        opportunities.append("标签具备在 B站/小黑盒/Steam中文社区做玩法切片传播的可能，需要验证素材强度。")
-    opportunities.append("可评估本地化、PR、愿望单增长和中文社区运营的轻量介入空间。")
+        opportunities.append("类型标签适合后续用 B站/小黑盒/Steam 中文评论验证受众。")
     return opportunities, score
 
 
@@ -408,7 +460,7 @@ def _build_risks(info: dict, tags: list[str], description_text: str) -> list[str
         risks.append("视频/Trailer 不足，难以判断前 15 秒传播钩子。")
     if _has_any(tags, LOW_PRIORITY_TAGS):
         risks.append("Clicker/Idler/Incremental 类型与当前筛选偏好不匹配，除非数据很强，否则降权。")
-    risks.append("玩法差异化需要试玩确认，不能只凭商店标签判断。")
+    risks.append("当前信息仍需试玩或社区声量复核，不能只凭商店标签判断。")
     return _dedupe(risks)
 
 
@@ -417,8 +469,8 @@ def _choose_next_action(info: dict, risks: list[str], opportunity_score: int) ->
         return "先试玩 Demo"
     if _to_int(info.get("movies_count")) > 0:
         return "先看视频/社区声量"
-    if opportunity_score >= 2:
-        return "可轻量联系"
+    if str(info.get("has_demo", "") or "").strip() != "是":
+        return "先确认是否有 Demo；如果没有 Demo，先看 Trailer / 社区声量"
     if not str(info.get("publisher", "") or "").strip():
         return "先查开发商背景"
     if len(risks) >= 5:
@@ -431,7 +483,7 @@ def _choose_backup_next_action(info: dict, next_action: str, risks: list[str], o
         "先查竞品",
         "先查开发商背景",
         "先看视频/社区声量",
-        "可轻量联系",
+        "先确认是否有 Demo；如果没有 Demo，先看 Trailer / 社区声量",
         "暂缓观察",
         "暂不跟进",
     ]
@@ -617,6 +669,11 @@ def _value(value) -> str:
         value = ", ".join(str(item) for item in value if str(item).strip())
     text = str(value).strip()
     return text if text else PLACEHOLDER
+
+
+def _has_value(value) -> bool:
+    text = str(value or "").strip()
+    return bool(text and text not in {PLACEHOLDER, "未获取", "未确认", "[]", "None", "nan"})
 
 
 def _format_positive_rate(value) -> str:

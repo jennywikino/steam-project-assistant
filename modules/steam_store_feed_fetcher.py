@@ -16,15 +16,16 @@ SEARCH_RESULTS_URL = "https://store.steampowered.com/search/results/"
 STEAM_HOME_FEED_GROUPS = [
     ("即将推出", ["popularcomingsoon", "comingsoon", "upcoming"]),
     ("近期上架", ["popularnew"]),
-    ("热销 / 热门趋势", ["topsellers", "popular"]),
-    ("折扣热点", ["specials"]),
+    ("热销参考", ["topsellers", "popular", "hot"]),
 ]
 
 SOURCE_GROUP_ALIASES = {
     "Steam 新品趋势": "近期上架",
     "Steam 即将推出": "即将推出",
-    "Steam 热销趋势": "热销 / 热门趋势",
-    "Steam 折扣热点": "折扣热点",
+    "Steam 热销趋势": "热销参考",
+    "Steam 折扣热点": "热销参考",
+    "热销 / 热门趋势": "热销参考",
+    "新品趋势": "近期上架",
 }
 
 
@@ -55,6 +56,19 @@ class SteamStoreFeedResult:
     errors: list[str] = field(default_factory=list)
 
 
+@dataclass
+class SteamStoreSearchResult:
+    query: str = ""
+    status_filter: str = "全部"
+    fetched_at: str = ""
+    from_cache: bool = False
+    used_stale_cache: bool = False
+    success: bool = False
+    message: str = ""
+    items: list[SteamStoreFeedItem] = field(default_factory=list)
+    error: str = ""
+
+
 def load_steam_store_home_feed(cache_path: Path, force_refresh: bool = False) -> SteamStoreFeedResult:
     cache = _load_cache(cache_path)
     if cache and not force_refresh and _cache_is_fresh(cache):
@@ -83,6 +97,62 @@ def load_steam_store_home_feed(cache_path: Path, force_refresh: bool = False) ->
         )
 
     _save_cache(cache_path, result)
+    return result
+
+
+def search_steam_store_items(
+    query: str,
+    cache_path: Path,
+    status_filter: str = "全部",
+    force_refresh: bool = False,
+    count: int = 12,
+) -> SteamStoreSearchResult:
+    clean_query = " ".join(str(query or "").split())
+    clean_status = str(status_filter or "全部").strip() or "全部"
+    if not clean_query:
+        return SteamStoreSearchResult(query=clean_query, status_filter=clean_status, success=False, message="请输入搜索关键词。")
+
+    cache = _load_cache(cache_path)
+    cache_key = _search_cache_key(clean_query, clean_status)
+    entry = cache.get("queries", {}).get(cache_key, {}) if isinstance(cache.get("queries"), dict) else {}
+    if entry and not force_refresh and _cache_is_fresh(entry):
+        return _search_result_from_cache_entry(clean_query, clean_status, entry, from_cache=True, used_stale_cache=False, message="搜索结果来自缓存。")
+
+    fetched_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        payload = _fetch_search_results("", count=count, term=clean_query)
+        items = _parse_search_payload(payload, "Steam 搜索", "search", fetched_at)[:count]
+    except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError) as exc:
+        if entry:
+            return _search_result_from_cache_entry(
+                clean_query,
+                clean_status,
+                entry,
+                from_cache=True,
+                used_stale_cache=True,
+                message=f"Steam 搜索失败，显示旧缓存：{exc}",
+                error=str(exc),
+            )
+        return SteamStoreSearchResult(
+            query=clean_query,
+            status_filter=clean_status,
+            fetched_at="",
+            success=False,
+            message=f"Steam 搜索失败：{exc}",
+            error=str(exc),
+        )
+
+    result = SteamStoreSearchResult(
+        query=clean_query,
+        status_filter=clean_status,
+        fetched_at=fetched_at,
+        from_cache=False,
+        used_stale_cache=False,
+        success=bool(items),
+        message="Steam 搜索完成。" if items else "Steam 搜索未返回结果。",
+        items=items,
+    )
+    _save_search_cache_entry(cache_path, cache, cache_key, result)
     return result
 
 
@@ -141,16 +211,19 @@ def _fetch_steam_store_home_feed() -> SteamStoreFeedResult:
     )
 
 
-def _fetch_search_results(search_filter: str, count: int) -> dict:
+def _fetch_search_results(search_filter: str, count: int, term: str = "") -> dict:
     params = {
         "json": "1",
         "count": str(count),
         "start": "0",
-        "filter": search_filter,
         "category1": "998",
         "l": "schinese",
         "cc": "CN",
     }
+    if search_filter:
+        params["filter"] = search_filter
+    if term:
+        params["term"] = term
     request = Request(
         SEARCH_RESULTS_URL + "?" + urlencode(params),
         headers={
@@ -304,6 +377,27 @@ def _save_cache(cache_path: Path, result: SteamStoreFeedResult) -> None:
         return
 
 
+def _save_search_cache_entry(cache_path: Path, cache: dict, cache_key: str, result: SteamStoreSearchResult) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = dict(cache) if isinstance(cache, dict) else {}
+    queries = payload.get("queries") if isinstance(payload.get("queries"), dict) else {}
+    queries[cache_key] = {
+        "cached_at": datetime.now().isoformat(timespec="seconds"),
+        "fetched_at": result.fetched_at,
+        "query": result.query,
+        "status_filter": result.status_filter,
+        "success": result.success,
+        "message": result.message,
+        "error": result.error,
+        "items": [asdict(item) for item in result.items],
+    }
+    payload["queries"] = queries
+    try:
+        cache_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        return
+
+
 def _cache_is_fresh(cache: dict) -> bool:
     age = _cache_age_seconds(cache)
     return 0 <= age <= CACHE_TTL_MINUTES * 60
@@ -316,6 +410,37 @@ def _cache_age_seconds(cache: dict) -> float:
     except ValueError:
         return -1
     return (datetime.now() - cached_time).total_seconds()
+
+
+def _search_cache_key(query: str, status_filter: str) -> str:
+    return f"{query.casefold()}|{status_filter}"
+
+
+def _search_result_from_cache_entry(
+    query: str,
+    status_filter: str,
+    entry: dict,
+    *,
+    from_cache: bool,
+    used_stale_cache: bool,
+    message: str,
+    error: str = "",
+) -> SteamStoreSearchResult:
+    rows = []
+    for row in entry.get("items", []) if isinstance(entry.get("items"), list) else []:
+        if isinstance(row, dict):
+            rows.append(SteamStoreFeedItem(**row))
+    return SteamStoreSearchResult(
+        query=query,
+        status_filter=status_filter,
+        fetched_at=str(entry.get("fetched_at", "") or ""),
+        from_cache=from_cache,
+        used_stale_cache=used_stale_cache,
+        success=bool(entry.get("success") or rows),
+        message=message,
+        items=rows,
+        error=error or str(entry.get("error", "") or ""),
+    )
 
 
 def _result_from_cache(cache: dict, from_cache: bool, used_stale_cache: bool, message: str) -> SteamStoreFeedResult:

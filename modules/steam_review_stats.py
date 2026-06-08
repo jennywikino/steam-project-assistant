@@ -71,14 +71,11 @@ def load_cached_review_stats(cache_path: Path) -> dict[str, dict]:
 def _fetch_review_stats(appid: str) -> dict:
     fetched_at = datetime.now().isoformat(timespec="seconds")
     try:
-        payload = _request_appreviews(appid, "summary")
-        summary = payload.get("query_summary") or {}
-        if not payload.get("reviews") and _to_int(summary.get("total_reviews")) > 0:
-            fallback = _request_appreviews(appid, "recent")
-            if fallback.get("reviews"):
-                payload["reviews"] = fallback.get("reviews")
+        payload = _request_appreviews(appid, "all")
     except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
-        return _empty_stats(appid, f"评价未获取：{exc}", fetched_at=fetched_at)
+        stats = _empty_stats(appid, "暂无评测数据", fetched_at=fetched_at)
+        stats["last_error"] = str(exc)
+        return stats
     return _stats_from_payload(appid, payload, fetched_at)
 
 
@@ -141,7 +138,7 @@ def _stats_from_payload(appid: str, payload: dict, fetched_at: str) -> dict:
         "appid": appid,
         "success": True,
         "fetched_at": fetched_at,
-        "cache_schema": "0.6.0",
+        "cache_schema": "0.6.2",
         "review_total": total_reviews,
         "review_positive": total_positive,
         "review_negative": total_negative,
@@ -164,7 +161,7 @@ def _empty_stats(appid: str, status: str, fetched_at: str = "") -> dict:
         "appid": str(appid or ""),
         "success": False,
         "fetched_at": fetched_at or datetime.now().isoformat(timespec="seconds"),
-        "cache_schema": "0.6.0",
+        "cache_schema": "0.6.2",
         "review_total": 0,
         "review_positive": 0,
         "review_negative": 0,

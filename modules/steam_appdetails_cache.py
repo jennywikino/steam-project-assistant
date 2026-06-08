@@ -43,6 +43,11 @@ def get_cached_appdetails_summary(appid: str, cache_path: Path, force_refresh: b
     refreshed = _fetch_appdetails_summary(clean_appid)
     if entry and not force_refresh and _entry_missing_required_fields(entry):
         refreshed["detail_fetch_status"] = "cache_missing_fields_refetched" if refreshed.get("success") else refreshed.get("detail_fetch_status", "")
+    if entry and not refreshed.get("success"):
+        stale = dict(entry)
+        stale["cache_status"] = "stale_cache_after_fetch_failed"
+        stale["detail_fetch_status"] = refreshed.get("detail_fetch_status", "刷新失败，显示旧缓存")
+        return stale
     refreshed["cache_status"] = "refetched" if force_refresh else "fetched"
     cache[clean_appid] = refreshed
     _save_cache(cache_path, cache)
@@ -144,7 +149,7 @@ def _summary_from_raw_appdetails(appid: str, raw: dict, checked_at: str) -> dict
         "checked_at": checked_at,
         "success": True,
         "name": str(details.get("name", "") or ""),
-        "cache_schema": "0.6.0",
+        "cache_schema": "0.6.1b",
         "detail_fetch_status": "已获取",
         "cache_status": "fetched",
         "developer": " / ".join(developers) if developers else "未获取",
@@ -171,6 +176,8 @@ def _summary_from_raw_appdetails(appid: str, raw: dict, checked_at: str) -> dict
         "supports_schinese": _detect_simplified_chinese(supported_languages),
         "header_image": str(details.get("header_image", "") or ""),
         "capsule_image": str(details.get("capsule_image", "") or ""),
+        "screenshots": _normalize_screenshots(screenshots),
+        "movies": _normalize_movies(movies),
         "screenshots_count": len(screenshots) if isinstance(screenshots, list) else 0,
         "movies_count": len(movies) if isinstance(movies, list) else 0,
         "packages_count": len(details.get("packages") or []) if isinstance(details.get("packages"), list) else 0,
@@ -208,7 +215,7 @@ def _empty_summary(appid: str, status: str, checked_at: str = "") -> dict:
         "checked_at": checked_at or datetime.now().isoformat(timespec="seconds"),
         "success": False,
         "name": "",
-        "cache_schema": "0.6.0",
+        "cache_schema": "0.6.1b",
         "detail_fetch_status": status,
         "cache_status": "none",
         "developer": "未获取",
@@ -235,6 +242,8 @@ def _empty_summary(appid: str, status: str, checked_at: str = "") -> dict:
         "supports_schinese": "未确认",
         "header_image": "",
         "capsule_image": "",
+        "screenshots": [],
+        "movies": [],
         "screenshots_count": 0,
         "movies_count": 0,
         "packages_count": 0,
@@ -248,6 +257,44 @@ def _as_text_list(value) -> list[str]:
     if value:
         return [str(value).strip()]
     return []
+
+
+def _normalize_screenshots(screenshots) -> list[dict]:
+    if not isinstance(screenshots, list):
+        return []
+    rows = []
+    for item in screenshots:
+        if not isinstance(item, dict):
+            continue
+        rows.append(
+            {
+                "id": str(item.get("id", "") or ""),
+                "path_thumbnail": str(item.get("path_thumbnail", "") or ""),
+                "path_full": str(item.get("path_full", "") or ""),
+            }
+        )
+    return rows
+
+
+def _normalize_movies(movies) -> list[dict]:
+    if not isinstance(movies, list):
+        return []
+    rows = []
+    for item in movies:
+        if not isinstance(item, dict):
+            continue
+        webm = item.get("webm") if isinstance(item.get("webm"), dict) else {}
+        mp4 = item.get("mp4") if isinstance(item.get("mp4"), dict) else {}
+        rows.append(
+            {
+                "id": str(item.get("id", "") or ""),
+                "name": str(item.get("name", "") or ""),
+                "thumbnail": str(item.get("thumbnail", "") or ""),
+                "webm": str(webm.get("max") or webm.get("480") or ""),
+                "mp4": str(mp4.get("max") or mp4.get("480") or ""),
+            }
+        )
+    return rows
 
 
 def _html_to_text(value: str) -> str:
@@ -302,10 +349,10 @@ def _entry_is_fresh(entry: dict) -> bool:
 def _entry_missing_required_fields(entry: dict) -> bool:
     if not isinstance(entry, dict):
         return True
-    required_keys = ["developers", "publishers", "genres", "categories", "release_date", "header_image"]
+    required_keys = ["developers", "publishers", "genres", "categories", "release_date", "header_image", "screenshots", "movies"]
     if any(key not in entry for key in required_keys):
         return True
-    if entry.get("cache_schema") != "0.6.0":
+    if entry.get("cache_schema") != "0.6.1b":
         return True
     if entry.get("success") and (
         "developer" not in entry
@@ -322,6 +369,9 @@ def _entry_missing_required_fields(entry: dict) -> bool:
         str(entry.get("release_date", "") or "").strip(),
         str(entry.get("price", "") or "").strip(),
     ]
+    identity_values = core_values[:3]
+    if all(value in empty_markers for value in identity_values):
+        return True
     if all(value in empty_markers for value in core_values):
         return True
     return False

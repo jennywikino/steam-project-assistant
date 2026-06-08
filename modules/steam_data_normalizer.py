@@ -17,16 +17,16 @@ def normalize_steam_game_data(
         search_item.get("steam_url"),
         f"https://store.steampowered.com/app/{clean_appid}/" if clean_appid else "",
     )
-    developer = _first(appdetails.get("developer"), search_item.get("developer"))
-    publisher = _first(appdetails.get("publisher"), search_item.get("publisher"))
-    genres = _first(appdetails.get("genres_text"), search_item.get("genres"))
-    categories = _first(appdetails.get("categories_text"), search_item.get("categories"))
+    developer = _first(appdetails.get("developer"), _join_list(appdetails.get("developers")), search_item.get("developer"))
+    publisher = _first(appdetails.get("publisher"), _join_list(appdetails.get("publishers")), search_item.get("publisher"))
+    genres = _first(appdetails.get("genres_text"), _join_list(appdetails.get("genres")), search_item.get("genres"))
+    categories = _first(appdetails.get("categories_text"), _join_list(appdetails.get("categories")), search_item.get("categories"))
     price = _first(appdetails.get("price"), search_item.get("price"))
     release_date = _first(appdetails.get("release_date"), search_item.get("release_date"))
 
     return {
         "appid": clean_appid,
-        "game_name": _first(search_item.get("game_name"), search_item.get("title"), appdetails.get("name")),
+        "game_name": _first(appdetails.get("name"), search_item.get("game_name"), search_item.get("title")),
         "steam_url": steam_url,
         "image_url": _first(appdetails.get("header_image"), search_item.get("image_url")),
         "developer": developer or "未获取",
@@ -63,6 +63,12 @@ def _first(*values) -> str:
         if text and text not in {"未获取", "未确认", "[]", "None", "nan"}:
             return text
     return ""
+
+
+def _join_list(value) -> str:
+    if isinstance(value, list):
+        return " / ".join(str(item).strip() for item in value if str(item).strip())
+    return str(value or "").strip()
 
 
 def _data_status(appdetails: dict, review_stats: dict) -> str:
