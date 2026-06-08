@@ -1,0 +1,4399 @@
+from pathlib import Path
+from datetime import datetime
+import re
+from urllib.parse import quote
+import webbrowser
+
+import pandas as pd
+import streamlit as st
+
+from modules.competitor_candidate import (
+    CompetitorCandidate,
+    build_candidate_options,
+    ensure_candidate_csv_exists,
+    filter_candidates,
+    generate_steam_search_links,
+    get_candidate_display_data,
+    load_candidates,
+    save_candidate_to_csv,
+    update_candidate_decision,
+)
+from modules.competitor_compare import (
+    CompetitorRecord,
+    ensure_competitor_csv_exists,
+    filter_competitors,
+    get_competitor_display_data,
+    load_competitors,
+    save_competitor_to_csv,
+)
+from modules.daily_watch import (
+    DailyWatchNote,
+    ensure_daily_watch_csv_exists,
+    load_daily_watch_notes,
+    save_daily_watch_note_to_csv,
+)
+from modules.excel_exporter import export_projects_to_excel
+from modules.external_title_clue_extractor import (
+    extract_external_title_clues,
+    fetch_external_title_clues,
+)
+from modules.project_card import (
+    ProjectCard,
+    build_project_action_options,
+    ensure_csv_exists,
+    filter_projects,
+    get_history_display_data,
+    load_projects,
+    save_project_to_csv,
+    update_project_deleted,
+    update_project_fields,
+)
+from modules.home_feed_fetcher import (
+    HomeFeedItem,
+    HomeFeedResult,
+    load_home_feed,
+)
+from modules.home_snapshots import (
+    HomeSnapshot,
+    ensure_home_snapshot_csv_exists,
+    load_home_snapshots,
+    save_home_snapshot_to_csv,
+    update_home_snapshot_fields,
+)
+from modules.project_profile_generator import (
+    PLACEHOLDER,
+    ProjectProfile,
+    generate_project_profile,
+    profile_summary_for_project,
+    profile_to_markdown,
+    profile_to_text,
+    save_profile_reports,
+)
+from modules.report_generator import generate_reports
+from modules.search_center_v031b import (
+    BATCH_CATEGORY_OPTIONS,
+    EXAMPLE_INPUT,
+    SEARCH_CENTER_SECTION_ORDER,
+    SearchCenterInput,
+    build_platform_navigation,
+    expand_links_for_display,
+    filter_navigation_by_batch_groups,
+    load_search_platforms,
+    prepare_navigation_for_csv,
+)
+from modules.steam_competitor_finder import (
+    SteamCompetitorCandidate,
+    candidate_to_dict as steam_candidate_to_dict,
+    find_steam_competitor_candidates,
+)
+from modules.steam_image_cache import get_cached_steam_image
+from modules.steam_appdetails_cache import (
+    clear_invalid_appdetails_cache,
+    count_missing_field_cache_entries,
+    debug_appdetails_summary,
+    get_cached_appdetails_summary,
+    load_cached_appdetails_summaries,
+)
+from modules.steam_data_normalizer import normalize_steam_game_data
+from modules.steam_review_stats import get_cached_review_stats
+from modules.steam_store_feed_fetcher import (
+    SteamStoreFeedItem,
+    SteamStoreFeedResult,
+    load_steam_store_home_feed,
+)
+from modules.steamdb_discovery import (
+    SteamDBTemplate,
+    SteamDBWatchNote,
+    ensure_template_csv_exists,
+    ensure_watch_note_csv_exists,
+    load_templates,
+    load_watch_notes,
+    parse_steamdb_appid,
+    save_template_to_csv,
+    save_watch_note_to_csv,
+    steam_url_from_appid,
+    steamdb_app_url_from_appid,
+    steamdb_quick_links,
+)
+from modules.steam_store_fetcher import parse_appid
+
+
+BASE_DIR = Path(__file__).resolve().parent
+CSV_PATH = BASE_DIR / "data" / "projects.csv"
+COMPETITOR_CSV_PATH = BASE_DIR / "data" / "competitors.csv"
+CANDIDATE_CSV_PATH = BASE_DIR / "data" / "competitor_candidates.csv"
+STEAMDB_TEMPLATE_CSV_PATH = BASE_DIR / "data" / "steamdb_link_templates.csv"
+STEAMDB_WATCH_NOTE_CSV_PATH = BASE_DIR / "data" / "steamdb_watch_notes.csv"
+DAILY_WATCH_CSV_PATH = BASE_DIR / "data" / "daily_watch_notes.csv"
+HOME_SNAPSHOT_CSV_PATH = BASE_DIR / "data" / "home_snapshots.csv"
+HOME_SNAPSHOT_IMAGE_DIR = BASE_DIR / "data" / "snapshots"
+HOME_FEED_CACHE_PATH = BASE_DIR / "data" / "cache" / "home_feed_cache.json"
+STEAM_HOME_FEED_CACHE_PATH = BASE_DIR / "data" / "cache" / "steam_home_feed_cache.json"
+STEAM_IMAGE_CACHE_PATH = BASE_DIR / "data" / "cache" / "steam_images_cache.json"
+STEAM_APPDETAILS_CACHE_PATH = BASE_DIR / "data" / "cache" / "steam_appdetails_cache.json"
+STEAM_REVIEW_STATS_CACHE_PATH = BASE_DIR / "data" / "cache" / "steam_review_stats_cache.json"
+STEAM_COMPETITOR_CACHE_PATH = BASE_DIR / "data" / "cache" / "steam_competitor_search_cache.json"
+APPDETAILS_DEBUG_DIR = BASE_DIR / "debug"
+MARKDOWN_REPORT_DIR = BASE_DIR / "reports" / "markdown"
+TXT_REPORT_DIR = BASE_DIR / "reports" / "txt"
+PROFILE_REPORT_DIR = BASE_DIR / "reports" / "profile"
+EXCEL_REPORT_PATH = BASE_DIR / "reports" / "excel" / "项目总表.xlsx"
+SEARCH_EXPORT_DIR = BASE_DIR / "exports"
+SEARCH_PLATFORM_CONFIG_PATH = BASE_DIR / "config" / "search_platforms.json"
+
+SEARCH_RECOMMENDED_PLATFORMS = [
+    "Steam 商店搜索",
+    "SteamDB",
+    "Bilibili",
+    "YouTube",
+    "Google",
+    "百度",
+    "小黑盒",
+    "NGA 玩家社区",
+    "TapTap",
+    "巴哈姆特",
+]
+
+SEARCH_CORE_KEYWORDS = [
+    "{game_name}",
+    "{game_name} Steam",
+    "{game_name} demo",
+    "{game_name} 试玩",
+    "{game_name} 中文评测",
+    "{game_name} gameplay",
+    "{game_name} trailer",
+    "{developer}",
+]
+
+SEARCH_MODE_LIMITS = {
+    "精简模式": {"per_platform": 2, "section": 30},
+    "标准模式": {"per_platform": 5, "section": 20},
+    "完整模式": {"per_platform": None, "section": None},
+}
+
+
+DOMESTIC_LINK_LABELS = ["百度", "B站", "小黑盒", "游民星空", "游侠"]
+OVERSEAS_LINK_LABELS = ["Google", "Steam", "SteamDB", "YouTube", "Reddit", "itch", "IGDB"]
+LINK_LABEL_TO_COLUMN = {
+    "Google": "Google 链接",
+    "百度": "百度链接",
+    "Steam": "Steam 搜索链接",
+    "SteamDB": "SteamDB 链接",
+    "YouTube": "YouTube 链接",
+    "B站": "B站链接",
+    "Reddit": "Reddit 链接",
+    "itch": "itch 链接",
+    "IGDB": "IGDB 链接",
+    "小黑盒": "小黑盒站内搜索",
+    "游民星空": "游民星空站内搜索",
+    "游侠": "游侠站内搜索",
+}
+COMPETITOR_SEARCH_COLUMNS = [
+    "created_at",
+    "game_name",
+    "steam_url",
+    "关键词",
+    "搜索意图",
+    "Steam 搜索链接",
+    "Google 链接",
+    "百度链接",
+    "Google Steam 链接",
+    "IGDB 链接",
+    "SteamDB 链接",
+    "小黑盒站内搜索",
+    "游民星空站内搜索",
+    "游侠站内搜索",
+    "人工备注",
+    "是否已检查",
+]
+COMPETITOR_SEARCH_DISPLAY_COLUMNS = [
+    "关键词",
+    "搜索意图",
+    "Steam 搜索链接",
+    "Google 链接",
+    "百度链接",
+    "Google Steam 链接",
+    "IGDB 链接",
+    "SteamDB 链接",
+    "小黑盒站内搜索",
+    "游民星空站内搜索",
+    "游侠站内搜索",
+    "人工备注",
+    "是否已检查",
+]
+PLATFORM_PRESENCE_COLUMNS = [
+    "created_at",
+    "game_name",
+    "steam_url",
+    "关键词",
+    "百度链接",
+    "YouTube 链接",
+    "B站链接",
+    "Reddit 链接",
+    "itch 链接",
+    "Google 链接",
+    "Steam 搜索链接",
+    "SteamDB 链接",
+    "IGDB 链接",
+    "小黑盒站内搜索",
+    "游民星空站内搜索",
+    "游侠站内搜索",
+    "Top 结果标题",
+    "播放量 / 浏览量 / 互动量",
+    "是否官方内容",
+    "是否媒体 / KOL 内容",
+    "人工判断",
+    "是否已检查",
+]
+PLATFORM_PRESENCE_DISPLAY_COLUMNS = [
+    "关键词",
+    "百度链接",
+    "YouTube 链接",
+    "B站链接",
+    "Reddit 链接",
+    "itch 链接",
+    "Google 链接",
+    "Steam 搜索链接",
+    "SteamDB 链接",
+    "IGDB 链接",
+    "小黑盒站内搜索",
+    "游民星空站内搜索",
+    "游侠站内搜索",
+    "Top 结果标题",
+    "播放量 / 浏览量 / 互动量",
+    "是否官方内容",
+    "是否媒体 / KOL 内容",
+    "人工判断",
+    "是否已检查",
+]
+OPEN_LINK_DISPLAY_COLUMNS = ["打开", "分组", "平台", "关键词", "链接"]
+
+
+def build_project_from_form(form_values: dict) -> ProjectCard:
+    """把页面表单数据整理成项目卡片。"""
+    return ProjectCard(**form_values)
+
+
+def build_competitor_from_form(form_values: dict) -> CompetitorRecord:
+    """把竞品表单数据整理成竞品记录。"""
+    return CompetitorRecord(**form_values)
+
+
+def build_candidate_from_form(form_values: dict) -> CompetitorCandidate:
+    """把候选表单数据整理成候选记录。"""
+    return CompetitorCandidate(**form_values)
+
+
+def get_project_options() -> list[dict]:
+    """读取未删除项目，生成可选择的目标项目。"""
+    projects = load_projects(CSV_PATH, include_deleted=False)
+    options = [{"label": "手动输入目标项目", "record_id": "", "game_name": "", "appid": ""}]
+    for _, row in projects.iterrows():
+        record_id = str(row.get("record_id", "")).strip()
+        game_name = str(row.get("game_name", "")).strip()
+        appid = str(row.get("appid", "")).strip()
+        if not game_name and not appid:
+            continue
+        label = f"{game_name} / {appid}" if appid else game_name
+        options.append({"label": label, "record_id": record_id, "game_name": game_name, "appid": appid})
+    return options
+
+
+def get_saved_project_options() -> list[dict]:
+    """读取可补充的已保存项目选项。"""
+    return [option for option in get_project_options() if option["record_id"]]
+
+
+def load_project_row(record_id: str):
+    """按记录 ID 读取项目行。"""
+    projects = load_projects(CSV_PATH, include_deleted=False)
+    matched = projects.loc[projects["record_id"].astype(str) == str(record_id)]
+    if matched.empty:
+        return None
+    return matched.iloc[0]
+
+
+def project_from_row(row) -> ProjectCard:
+    """把 CSV 行恢复成 ProjectCard，供报告生成使用。"""
+    values = {
+        field_name: row.get(field_name, "")
+        for field_name in ProjectCard.__dataclass_fields__
+        if field_name in row
+    }
+    return ProjectCard(**values)
+
+
+def build_report_for_project(project: ProjectCard) -> tuple[Path, Path]:
+    """为项目生成报告，并带上对应竞品和候选记录。"""
+    competitors = filter_competitors(load_competitors(COMPETITOR_CSV_PATH), project.appid, project.game_name)
+    candidates = filter_candidates(load_candidates(CANDIDATE_CSV_PATH), project.appid, project.game_name, "全部")
+    return generate_reports(
+        project,
+        MARKDOWN_REPORT_DIR,
+        TXT_REPORT_DIR,
+        competitors,
+        candidates,
+    )
+
+
+def render_report_result(project: ProjectCard) -> None:
+    """生成报告并显示路径。"""
+    markdown_path, txt_path = build_report_for_project(project)
+    st.success("初筛报告已生成。")
+    st.write(f"Markdown 报告路径：{markdown_path}")
+    st.write(f"TXT 报告路径：{txt_path}")
+
+
+def render_profile_draft_page() -> None:
+    """Render the V0.4 one-click project profile draft workflow."""
+    st.subheader("一键项目画像")
+    st.caption("输入 Steam 链接或 AppID 后，工具只基于公开商店信息和规则生成初筛草稿；不接 AI API，不抓评论。")
+
+    render_external_title_clue_controls()
+
+    with st.form("project_profile_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            steam_input = st.text_input(
+                "Steam 链接或 AppID",
+                key="profile_steam_input",
+                placeholder="https://store.steampowered.com/app/123456/Game_Name/",
+            )
+            chinese_name = st.text_input("游戏中文名（可选）", key="profile_chinese_name")
+            user_keywords = st.text_area("用户补充关键词（可选，逗号或换行分隔）", height=90, key="profile_user_keywords")
+            pasted_titles = st.text_area(
+                "外部标题线索，可选",
+                height=110,
+                key="profile_external_title_clues",
+                help="可把 B站、YouTube、百度、Google、小黑盒等搜索结果标题粘进来。工具会提取类型词和竞品名，不需要全文。",
+            )
+        with col2:
+            user_has_demo = st.selectbox("是否已有 Demo（可选）", ["未确认", "是", "否"], key="profile_user_has_demo")
+            user_demo_played = st.selectbox("是否已试玩（可选）", ["未确认", "已试玩", "未试玩"], key="profile_user_demo_played")
+            st.info("字段拿不到时会显示“未获取/需人工确认”，不会自动编造。")
+
+        generate_profile = st.form_submit_button("生成项目画像草稿")
+
+    if generate_profile:
+        appid = parse_appid(steam_input)
+        if not appid:
+            st.error("未能从输入中解析 AppID，请输入 Steam 商店链接或纯数字 AppID。")
+        else:
+            prefill = st.session_state.get("profile_prefill_metadata", {})
+            if not isinstance(prefill, dict) or str(prefill.get("appid", "")).strip() not in {"", appid}:
+                prefill = {}
+            detail = get_cached_appdetails_summary(appid, STEAM_APPDETAILS_CACHE_PATH)
+            review_stats = get_cached_review_stats(appid, STEAM_REVIEW_STATS_CACHE_PATH)
+            if not review_stats.get("success") and str(prefill.get("review_total", "") or "").strip():
+                review_stats = {**review_stats, **prefill, "success": True, "review_stats_status": prefill.get("review_stats_status") or "来自首页预填"}
+            normalized = normalize_steam_game_data(
+                appid=appid,
+                search_item=prefill,
+                appdetails=detail,
+                review_stats=review_stats,
+            )
+            store_info = {
+                **normalized,
+                "name": normalized.get("game_name", ""),
+                "developers": detail.get("developers", []),
+                "publishers": detail.get("publishers", []),
+                "release_status": normalized.get("release_date", ""),
+                "has_simplified_chinese": normalized.get("supports_schinese", ""),
+                "tags": detail.get("tags", []),
+                "short_description": detail.get("short_description", ""),
+                "about_the_game": detail.get("about_the_game", ""),
+                "screenshots_count": detail.get("screenshots_count", 0),
+                "movies_count": detail.get("movies_count", 0),
+                "mature_content": detail.get("mature_content", ""),
+            }
+            if chinese_name.strip():
+                store_info["name"] = chinese_name.strip()
+            if user_has_demo != "未确认":
+                store_info["has_demo"] = user_has_demo
+
+            profile = generate_project_profile(
+                store_info,
+                chinese_name=chinese_name,
+                user_keywords=user_keywords,
+                user_has_demo=user_has_demo,
+                user_demo_played=user_demo_played,
+                external_title_clues=pasted_titles,
+            )
+            st.session_state["project_profile_draft"] = profile
+            st.session_state["project_profile_fetch_success"] = bool(detail.get("success") or prefill)
+            st.session_state["project_profile_fetch_message"] = (
+                f"已读取 Steam 缓存数据：{normalized.get('data_status')}"
+            )
+            st.session_state["profile_pending_duplicate_appid"] = ""
+
+    profile = st.session_state.get("project_profile_draft")
+    if not isinstance(profile, ProjectProfile):
+        return
+
+    fetch_message = st.session_state.get("project_profile_fetch_message", "")
+    if st.session_state.get("project_profile_fetch_success"):
+        st.success(fetch_message)
+    elif fetch_message:
+        st.warning(fetch_message)
+
+    render_profile_draft(profile)
+    render_profile_steam_competitors(profile)
+    render_profile_actions(profile)
+
+
+def render_external_title_clue_controls() -> None:
+    with st.expander("外部标题线索，可选", expanded=False):
+        st.caption("可把 B站、YouTube、百度、Google、小黑盒等搜索结果标题粘进来。工具只提取标题里的类型词和竞品名。")
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            st.write("手动粘贴标题是主路径；自动抓取可能因动态加载或反爬失败。")
+        with col2:
+            if st.button("尝试抓取外部标题线索", key="profile_fetch_external_titles"):
+                raw_input = st.session_state.get("profile_steam_input", "")
+                appid = parse_appid(raw_input)
+                game_name = st.session_state.get("profile_chinese_name", "") or st.session_state.get("profile_game_name", "")
+                if not game_name and appid:
+                    game_name = appid
+                clues = fetch_external_title_clues(game_name=game_name, english_name="", appid=appid)
+                if clues.raw_titles:
+                    existing = st.session_state.get("profile_external_title_clues", "")
+                    merged = "\n".join([part for part in [existing.strip(), "\n".join(clues.raw_titles)] if part])
+                    st.session_state["profile_external_title_clues"] = merged
+                    st.success(clues.source_message)
+                else:
+                    st.warning(clues.source_message or "自动抓取失败，请手动粘贴标题。")
+
+        pasted = st.session_state.get("profile_external_title_clues", "")
+        if pasted:
+            clues = extract_external_title_clues(pasted)
+            st.write("已提取线索：" + " / ".join(clues.extracted_terms[:12]))
+
+
+def render_profile_draft(profile: ProjectProfile) -> None:
+    """Display compact generated profile sections."""
+    st.markdown("### 发行判断卡")
+    summary = profile.quick_summary or {}
+    info = profile.raw_store_info or {}
+
+    type_col, selling_col = st.columns([1, 2])
+    with type_col:
+        st.markdown("**类型定位**")
+        st.write(summary.get("游戏类型 / 赛道定位", PLACEHOLDER))
+    with selling_col:
+        st.markdown("**卖点一句话**")
+        st.write(_first_specific_item(summary.get("主卖点", [])) or _first_specific_item(profile.selling_points) or PLACEHOLDER)
+
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("好评率", format_positive_rate(info.get("positive_rate")))
+    metric_cols[1].metric("评测数", format_review_total(info.get("review_total")))
+    metric_cols[2].metric("中位游玩", format_hours(info.get("median_playtime_hours")))
+    metric_cols[3].metric("平均游玩", format_hours(info.get("avg_playtime_hours")))
+    st.caption("游玩时间基于 Steam 评测样本，不代表全体玩家。")
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown("**发行空间**")
+        st.write(_first_specific_item(profile.china_opportunities) or "待数据或人工确认")
+    with col2:
+        st.markdown("**最大风险**")
+        st.write(_first_specific_item(summary.get("主要风险", [])) or _first_specific_item(profile.risks) or "待人工确认")
+    with col3:
+        st.markdown("**下一步动作**")
+        st.write(f"主：{profile.next_action or PLACEHOLDER}")
+        st.caption(f"备：{profile.backup_next_action or PLACEHOLDER}")
+
+    st.caption("基于公开信息生成，需试玩复核。")
+
+    with st.expander("自动获取到的基础信息", expanded=False):
+        basic_rows = [{"字段": key, "内容": value or PLACEHOLDER} for key, value in profile.basic_info.items()]
+        st.dataframe(pd.DataFrame(basic_rows), use_container_width=True, hide_index=True)
+
+    data_source_items = [
+        f"Steam AppID：{profile.basic_info.get('AppID', PLACEHOLDER)}",
+        f"Steam 链接：{profile.basic_info.get('Steam 链接', PLACEHOLDER)}",
+        f"数据状态：{info.get('data_status', PLACEHOLDER)}",
+        f"评价状态：{info.get('review_stats_status', PLACEHOLDER)}",
+    ]
+    if data_source_items or profile.source_limitations:
+        with st.expander("查看数据来源", expanded=False):
+            render_profile_bullet_section("来源", data_source_items)
+            render_profile_bullet_section("限制", _specific_items(profile.source_limitations))
+
+    competitor_items = _specific_items(profile.competitor_anchors + profile.competition_dimensions)
+    if competitor_items:
+        with st.expander("查看竞品候选", expanded=False):
+            render_profile_bullet_section("竞品锚点 / 比较维度", competitor_items)
+
+    manual_items = _specific_items(profile.manual_checklist + profile.risks)
+    if manual_items:
+        with st.expander("查看人工待确认项", expanded=False):
+            render_profile_bullet_section("待确认", manual_items)
+
+    with st.expander("查看卖点与核心循环", expanded=False):
+        st.markdown(f"**核心玩法初判**：{profile.core_gameplay_judgment}")
+        render_profile_bullet_section("卖点", _specific_items(profile.selling_points))
+
+
+def render_profile_bullet_section(title: str, items: list[str]) -> None:
+    st.markdown(f"**{title}**")
+    if not items:
+        st.write(f"- {PLACEHOLDER}")
+        return
+    for item in items:
+        st.write(f"- {item}")
+
+
+def _specific_items(items: list[str]) -> list[str]:
+    generic_markers = [
+        "可能存在发行沟通空间",
+        "需要试玩确认",
+        "玩法差异化需要试玩确认",
+        "待从候选池确认",
+        "本地化、PR、愿望单增长",
+        "核心循环是否真的成立",
+        "开发商是否愿意合作",
+        "中国玩家是否有兴趣",
+    ]
+    output = []
+    for item in items or []:
+        text = str(item or "").strip()
+        if not text or text == PLACEHOLDER:
+            continue
+        if any(marker in text for marker in generic_markers):
+            continue
+        if text not in output:
+            output.append(text)
+    return output
+
+
+def _first_specific_item(items: list[str]) -> str:
+    values = _specific_items(items)
+    return values[0] if values else ""
+
+
+def render_profile_steam_competitors(profile: ProjectProfile) -> None:
+    """Render Steam competitor candidate finder for the current profile."""
+    st.markdown("### Steam 竞品候选")
+    option_col, action_col = st.columns([2, 1])
+    with option_col:
+        ignore_cache = st.checkbox("忽略缓存，重新搜索", value=False, key="steam_candidate_ignore_cache")
+    with action_col:
+        search_candidates = st.button("自动查找 Steam 竞品候选", key="steam_candidate_search")
+
+    if search_candidates:
+        game_info = build_competitor_finder_input(profile)
+        user_keywords = st.session_state.get("profile_user_keywords", "")
+        result = find_steam_competitor_candidates(
+            game_info,
+            STEAM_COMPETITOR_CACHE_PATH,
+            user_keywords=user_keywords,
+            external_title_clues=st.session_state.get("profile_external_title_clues", ""),
+            ignore_cache=ignore_cache,
+        )
+        st.session_state["steam_candidate_result_message"] = result.message
+        st.session_state["steam_candidate_result_success"] = result.success
+        st.session_state["steam_candidate_result_used_cache"] = result.used_cache
+        st.session_state["steam_candidate_results"] = result.candidates
+        st.session_state["steam_candidate_keywords"] = result.keywords
+
+    message = st.session_state.get("steam_candidate_result_message", "")
+    if message:
+        if st.session_state.get("steam_candidate_result_success"):
+            cache_note = "（来自缓存）" if st.session_state.get("steam_candidate_result_used_cache") else ""
+            st.success(f"{message}{cache_note}")
+        else:
+            st.warning(message)
+
+    keywords = st.session_state.get("steam_candidate_keywords", [])
+    if keywords:
+        st.caption("搜索关键词：" + " / ".join(str(keyword) for keyword in keywords))
+
+    candidates = st.session_state.get("steam_candidate_results", [])
+    if not candidates:
+        return
+
+    high_mid_candidates = [candidate for candidate in candidates if candidate.match_level in {"高", "中"}]
+    low_candidates = [candidate for candidate in candidates if candidate.match_level == "低"]
+    visible_candidates = high_mid_candidates[:10]
+    if visible_candidates:
+        st.caption("默认显示前 10 个高/中匹配候选。")
+        render_steam_candidate_table(profile, visible_candidates)
+    else:
+        st.info("暂无高/中匹配候选，可展开查看低匹配候选。")
+    with st.expander(f"显示低匹配候选（{len(low_candidates)}）", expanded=False):
+        if low_candidates:
+            render_steam_candidate_table(profile, low_candidates)
+        else:
+            st.write("暂无低匹配候选。")
+
+
+def build_competitor_finder_input(profile: ProjectProfile) -> dict:
+    info = dict(profile.raw_store_info or {})
+    info.setdefault("appid", "" if profile.basic_info.get("AppID") == PLACEHOLDER else profile.basic_info.get("AppID", ""))
+    info.setdefault("name", "" if profile.basic_info.get("游戏名") == PLACEHOLDER else profile.basic_info.get("游戏名", ""))
+    info.setdefault("developer", "" if profile.basic_info.get("开发商") == PLACEHOLDER else profile.basic_info.get("开发商", ""))
+    info.setdefault("publisher", "" if profile.basic_info.get("发行商") == PLACEHOLDER else profile.basic_info.get("发行商", ""))
+    if not info.get("tags"):
+        tags = profile.basic_info.get("类型/标签", "")
+        info["tags"] = "" if tags == PLACEHOLDER else tags
+    return info
+
+
+def render_steam_candidate_table(profile: ProjectProfile, candidates: list[SteamCompetitorCandidate]) -> None:
+    rows = []
+    for candidate in candidates:
+        rows.append(
+            {
+                "候选游戏": candidate.candidate_name,
+                "AppID": candidate.candidate_appid,
+                "价格": candidate.candidate_price or PLACEHOLDER,
+                "发售日": candidate.candidate_release_date or PLACEHOLDER,
+                "评价": candidate.candidate_review_summary or PLACEHOLDER,
+                "来源关键词": candidate.source_keyword,
+                "匹配等级": candidate.match_level,
+                "匹配分数": candidate.match_score,
+                "匹配理由": candidate.match_reason,
+            }
+        )
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    for index, candidate in enumerate(candidates):
+        with st.container():
+            st.markdown(f"**{candidate.candidate_name}**")
+            cols = st.columns([1, 1, 1, 1, 3])
+            with cols[0]:
+                st.link_button("打开 Steam 页面", candidate.candidate_steam_url, use_container_width=True)
+            with cols[1]:
+                if st.button("加入候选池", key=f"add_steam_candidate_{candidate.candidate_appid}_{index}"):
+                    save_steam_candidate_to_pool(profile, candidate, "待确认")
+            with cols[2]:
+                if st.button("排除", key=f"exclude_steam_candidate_{candidate.candidate_appid}_{index}"):
+                    save_steam_candidate_to_pool(profile, candidate, "排除")
+            with cols[3]:
+                st.metric("匹配", f"{candidate.match_level} {candidate.match_score}")
+            with cols[4]:
+                st.caption(candidate.match_reason or "匹配度待人工确认。")
+
+
+def save_steam_candidate_to_pool(
+    profile: ProjectProfile,
+    candidate: SteamCompetitorCandidate,
+    decision: str,
+) -> None:
+    if steam_candidate_exists(profile, candidate):
+        st.info("该候选已存在于候选池，不重复写入。")
+        return
+    data = steam_candidate_to_dict(candidate)
+    data["user_decision"] = decision
+    candidate_record = build_candidate_from_form(data)
+    save_candidate_to_csv(candidate_record, CANDIDATE_CSV_PATH)
+    st.success(f"已写入候选池：{candidate.candidate_name}（{decision}）")
+
+
+def steam_candidate_exists(profile: ProjectProfile, candidate: SteamCompetitorCandidate) -> bool:
+    candidates = load_candidates(CANDIDATE_CSV_PATH)
+    if candidates.empty or "candidate_appid" not in candidates.columns:
+        return False
+    target_appid = str(candidate.target_appid or profile.basic_info.get("AppID", "")).strip()
+    target_name = str(candidate.target_game_name or profile.basic_info.get("游戏名", "")).strip()
+    candidate_appid = str(candidate.candidate_appid).strip()
+    if not candidate_appid:
+        return False
+
+    mask = candidates["candidate_appid"].astype(str).str.strip().eq(candidate_appid)
+    if target_appid and "target_appid" in candidates.columns:
+        mask = mask & candidates["target_appid"].astype(str).str.strip().eq(target_appid)
+    elif target_name and "target_game_name" in candidates.columns:
+        mask = mask & candidates["target_game_name"].astype(str).str.strip().str.casefold().eq(target_name.casefold())
+    return bool(mask.any())
+
+
+def render_profile_actions(profile: ProjectProfile) -> None:
+    """Render save, export, and cross-module handoff actions."""
+    st.markdown("### 操作")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if st.button("保存为项目记录", key="profile_save_project"):
+            save_profile_as_project(profile, allow_duplicate=False)
+    with col2:
+        if st.button("生成 Markdown 画像报告", key="profile_export_md"):
+            markdown_path, _ = save_profile_reports(profile, PROFILE_REPORT_DIR)
+            st.success(f"Markdown 画像报告已生成：{markdown_path}")
+    with col3:
+        if st.button("生成 txt 画像报告", key="profile_export_txt"):
+            _, txt_path = save_profile_reports(profile, PROFILE_REPORT_DIR)
+            st.success(f"TXT 画像报告已生成：{txt_path}")
+
+    duplicate_appid = st.session_state.get("profile_pending_duplicate_appid", "")
+    if duplicate_appid:
+        st.warning("该项目已存在，是否追加为新记录或更新旧记录？当前 V0.4 先支持追加为新记录。")
+        if st.button("确认追加为新记录", key="profile_confirm_append_project"):
+            save_profile_as_project(profile, allow_duplicate=True)
+            st.session_state["profile_pending_duplicate_appid"] = ""
+
+    link_col1, link_col2 = st.columns(2)
+    with link_col1:
+        if st.button("发送到搜索中心生成搜索入口", key="profile_send_search"):
+            send_profile_to_search_center(profile)
+    with link_col2:
+        if st.button("发送到竞品候选发现器", key="profile_send_candidate"):
+            send_profile_to_candidate_finder(profile)
+
+    with st.expander("预览 Markdown 画像报告", expanded=False):
+        st.code(profile_to_markdown(profile), language="markdown")
+
+
+def save_profile_as_project(profile: ProjectProfile, allow_duplicate: bool = False) -> None:
+    """Append a profile draft to the existing project CSV without overwriting rows."""
+    summary = profile_summary_for_project(profile)
+    appid = str(summary.get("appid", "")).strip()
+    if appid and not allow_duplicate and project_appid_exists(appid):
+        st.session_state["profile_pending_duplicate_appid"] = appid
+        st.warning("该项目已存在，是否追加为新记录或更新旧记录？当前 V0.4 先支持追加为新记录。")
+        return
+
+    project = build_project_from_form(summary)
+    saved_csv_path = save_project_to_csv(project, CSV_PATH)
+    st.success(f"项目画像已保存为项目记录：{saved_csv_path}")
+
+
+def project_appid_exists(appid: str) -> bool:
+    if not str(appid).strip():
+        return False
+    projects = load_projects(CSV_PATH, include_deleted=True)
+    if projects.empty or "appid" not in projects.columns:
+        return False
+    return projects["appid"].astype(str).str.strip().eq(str(appid).strip()).any()
+
+
+def send_profile_to_search_center(profile: ProjectProfile) -> None:
+    """Pre-fill search center fields and generate navigation rows."""
+    search_values = build_search_values_from_profile(profile)
+    apply_search_center_values(search_values)
+    st.session_state["search_keyword_limit"] = max(20, len(profile.search_keywords))
+    try:
+        platforms = load_search_platforms(SEARCH_PLATFORM_CONFIG_PATH)
+        navigation_table = build_platform_navigation(
+            SearchCenterInput(**search_values),
+            platforms,
+            limit=int(st.session_state.get("search_keyword_limit", 20)),
+        )
+    except Exception as exc:
+        st.error(f"搜索中心生成失败，不影响画像草稿：{exc}")
+        return
+    st.session_state["search_navigation_table"] = navigation_table
+    st.success("已发送到搜索中心并生成搜索入口，可切换到“搜索中心”Tab 查看。")
+
+
+def build_search_values_from_profile(profile: ProjectProfile) -> dict:
+    info = profile.raw_store_info or {}
+    tags = profile.basic_info.get("类型/标签", "")
+    english_keywords = ", ".join(
+        keyword
+        for keyword in profile.search_keywords
+        if keyword and keyword.isascii() and keyword.casefold() not in {"steam", "demo", "review", "trailer"}
+    )
+    return {
+        "game_name": profile.basic_info.get("游戏名", "") if profile.basic_info.get("游戏名") != PLACEHOLDER else "",
+        "steam_url": profile.basic_info.get("Steam 链接", "") if profile.basic_info.get("Steam 链接") != PLACEHOLDER else "",
+        "short_description": str(info.get("short_description", "") or profile.core_gameplay_judgment),
+        "tags": "" if tags == PLACEHOLDER else tags,
+        "core_keywords": ", ".join(profile.search_keywords),
+        "theme_keywords": "" if tags == PLACEHOLDER else tags,
+        "english_keywords": english_keywords,
+        "reference_games": "",
+        "developer": "" if profile.basic_info.get("开发商") == PLACEHOLDER else profile.basic_info.get("开发商", ""),
+        "publisher": "" if profile.basic_info.get("发行商") == PLACEHOLDER else profile.basic_info.get("发行商", ""),
+    }
+
+
+def send_profile_to_candidate_finder(profile: ProjectProfile) -> None:
+    """Pre-fill the competitor candidate finder inputs without creating fake competitors."""
+    game_name = profile.basic_info.get("游戏名", "")
+    appid = profile.basic_info.get("AppID", "")
+    tags = profile.basic_info.get("类型/标签", "")
+    st.session_state["competition_target_game_name"] = "" if game_name == PLACEHOLDER else game_name
+    st.session_state["competition_target_appid"] = "" if appid == PLACEHOLDER else appid
+    st.session_state["candidate_primary_tags"] = "" if tags == PLACEHOLDER else tags
+    st.session_state["candidate_gameplay_keywords"] = profile.core_gameplay_judgment
+    st.session_state["candidate_english_keywords"] = ", ".join(
+        keyword for keyword in profile.search_keywords if keyword and keyword.isascii()
+    )
+    st.success("已发送到竞品候选发现器，可切换到“竞品与候选”Tab 继续生成候选搜索链接。")
+
+
+def combine_next_action(action: str, note: str) -> str:
+    """合并下一步动作选项和补充说明。"""
+    clean_note = str(note).strip()
+    if clean_note:
+        return f"{action}：{clean_note}"
+    return action
+
+
+def render_quick_record_page() -> None:
+    """渲染 30 秒快速记录表单。"""
+    st.subheader("快速记录")
+    st.caption("只填当前能确认的信息即可保存，未填写字段会保留为空。")
+
+    with st.form("quick_record_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            game_name = st.text_input("游戏名", key="quick_game_name")
+            steam_url = st.text_input("Steam 链接", key="quick_steam_url")
+            appid = st.text_input("Steam AppID", key="quick_appid")
+            developer = st.text_input("开发商", key="quick_developer")
+            publisher = st.text_input("发行商", key="quick_publisher")
+            release_status = st.selectbox(
+                "发售状态",
+                ["未填写", "未发售", "抢先体验", "已发售", "即将推出"],
+                key="quick_release_status",
+            )
+        with col2:
+            has_demo = st.selectbox("是否有 Demo", ["未确认", "是", "否"], key="quick_has_demo")
+            has_simplified_chinese = st.selectbox(
+                "是否支持简体中文",
+                ["未确认", "是", "否"],
+                key="quick_has_simplified_chinese",
+            )
+            genre_tags = st.text_area("类型/标签", height=80, key="quick_genre_tags")
+            core_loop = st.text_area(
+                "核心玩法一句话",
+                height=80,
+                key="quick_core_loop",
+                help="一句话说明玩家反复做什么",
+            )
+            first_impression = st.text_area(
+                "第一印象",
+                height=90,
+                key="quick_first_impression",
+                help="商店页和视频给你的第一判断",
+            )
+
+        action_col, note_col = st.columns([1, 2])
+        with action_col:
+            next_action_choice = st.selectbox(
+                "下一步动作",
+                ["未决定", "先试玩 Demo", "先查竞品", "联系开发者", "暂缓观察", "暂不跟进"],
+                key="quick_next_action_choice",
+                help="试玩 / 联系 / 暂缓 / 放弃 / 等版本",
+            )
+        with note_col:
+            next_action_note = st.text_input("下一步动作补充说明", key="quick_next_action_note")
+
+        with st.expander("展开填写更多信息", expanded=False):
+            china_publishing_opportunity = st.text_area(
+                "中国区发行机会",
+                height=100,
+                key="quick_china_publishing_opportunity",
+            )
+            risks = st.text_area("主要风险", height=100, key="quick_risks")
+
+        col_save, col_report = st.columns([1, 1])
+        with col_save:
+            save_only = st.form_submit_button("保存快速记录")
+        with col_report:
+            save_and_report = st.form_submit_button("保存并生成报告")
+
+    if save_only or save_and_report:
+        project = build_project_from_form(
+            {
+                "game_name": game_name,
+                "steam_url": steam_url,
+                "appid": appid,
+                "developer": developer,
+                "publisher": publisher,
+                "release_status": release_status,
+                "has_demo": has_demo,
+                "has_simplified_chinese": has_simplified_chinese,
+                "genre_tags": genre_tags,
+                "core_loop": core_loop,
+                "first_impression": first_impression,
+                "china_publishing_opportunity": china_publishing_opportunity,
+                "risks": risks,
+                "next_action": combine_next_action(next_action_choice, next_action_note),
+            }
+        )
+
+        saved_csv_path = save_project_to_csv(project, CSV_PATH)
+        st.success(f"已保存快速记录：{saved_csv_path}")
+        st.info("后续可在 Demo 试玩、竞品与候选页继续补充。")
+
+        if save_and_report:
+            render_report_result(project)
+
+
+def render_demo_review_page() -> None:
+    """渲染默认折叠的 Demo 深度评估表单。"""
+    st.subheader("Demo 试玩")
+    project_options = get_saved_project_options()
+    if not project_options:
+        st.info("暂无已保存项目。请先在快速记录页保存一个项目。")
+        return
+
+    selected_label = st.selectbox(
+        "选择要补充 Demo 试玩的项目",
+        [option["label"] for option in project_options],
+        key="demo_project_selector",
+    )
+    selected_project = next(option for option in project_options if option["label"] == selected_label)
+    project_row = load_project_row(selected_project["record_id"])
+    if project_row is None:
+        st.warning("未找到该项目记录，请刷新后重试。")
+        return
+
+    with st.form("demo_review_form"):
+        with st.expander("基础试玩信息", expanded=False):
+            demo_played = st.selectbox(
+                "是否已试玩 Demo",
+                ["未试玩", "已试玩", "无 Demo"],
+                index=["未试玩", "已试玩", "无 Demo"].index(project_row.get("demo_played", "未试玩"))
+                if project_row.get("demo_played", "未试玩") in ["未试玩", "已试玩", "无 Demo"]
+                else 0,
+                key="demo_played",
+            )
+            playtime_minutes = st.number_input(
+                "试玩时长分钟",
+                min_value=0,
+                step=5,
+                value=int(project_row.get("playtime_minutes", "0") or 0),
+                key="playtime_minutes",
+            )
+            demo_conclusion = st.text_area(
+                "Demo 试玩结论",
+                value=str(project_row.get("demo_conclusion", "")),
+                height=100,
+                key="demo_conclusion",
+                help="试玩后是否值得继续跟进",
+            )
+
+        with st.expander("分钟段体验", expanded=False):
+            first_5min_experience = st.text_area(
+                "0-5分钟体验",
+                value=str(project_row.get("first_5min_experience", "")),
+                height=90,
+                key="first_5min_experience",
+            )
+            first_15min_experience = st.text_area(
+                "5-15分钟体验",
+                value=str(project_row.get("first_15min_experience", "")),
+                height=90,
+                key="first_15min_experience",
+            )
+            first_30min_experience = st.text_area(
+                "15-30分钟体验",
+                value=str(project_row.get("first_30min_experience", "")),
+                height=90,
+                key="first_30min_experience",
+            )
+
+        with st.expander("问题记录", expanded=False):
+            tutorial_issue = st.text_area(
+                "新手引导问题",
+                value=str(project_row.get("tutorial_issue", "")),
+                height=90,
+                key="tutorial_issue",
+            )
+            control_issue = st.text_area(
+                "操作/手感问题",
+                value=str(project_row.get("control_issue", "")),
+                height=90,
+                key="control_issue",
+            )
+            combat_or_system_issue = st.text_area(
+                "战斗/系统/经营问题",
+                value=str(project_row.get("combat_or_system_issue", "")),
+                height=90,
+                key="combat_or_system_issue",
+            )
+            localization_issue = st.text_area(
+                "本地化问题",
+                value=str(project_row.get("localization_issue", "")),
+                height=90,
+                key="localization_issue",
+            )
+            performance_issue = st.text_area(
+                "性能/稳定性问题",
+                value=str(project_row.get("performance_issue", "")),
+                height=90,
+                key="performance_issue",
+            )
+
+        with st.expander("发行判断", expanded=False):
+            core_loop_clarity = st.selectbox(
+                "核心循环是否清晰",
+                ["未判断", "清晰", "部分清晰", "不清晰"],
+                index=["未判断", "清晰", "部分清晰", "不清晰"].index(
+                    project_row.get("core_loop_clarity", "未判断")
+                )
+                if project_row.get("core_loop_clarity", "未判断") in ["未判断", "清晰", "部分清晰", "不清晰"]
+                else 0,
+                key="core_loop_clarity",
+            )
+            content_depth = st.text_area(
+                "内容深度判断",
+                value=str(project_row.get("content_depth", "")),
+                height=90,
+                key="content_depth",
+            )
+            video_hook = st.selectbox(
+                "视频传播点",
+                ["未判断", "有", "一般", "没有"],
+                index=["未判断", "有", "一般", "没有"].index(project_row.get("video_hook", "未判断"))
+                if project_row.get("video_hook", "未判断") in ["未判断", "有", "一般", "没有"]
+                else 0,
+                key="video_hook",
+            )
+            china_player_reaction = st.text_area(
+                "中国玩家可能反馈",
+                value=str(project_row.get("china_player_reaction", "")),
+                height=90,
+                key="china_player_reaction",
+            )
+
+        col_save, col_report = st.columns([1, 1])
+        with col_save:
+            save_demo = st.form_submit_button("保存 Demo 试玩记录")
+        with col_report:
+            save_demo_and_report = st.form_submit_button("保存并生成报告")
+
+    if save_demo or save_demo_and_report:
+        updates = {
+            "demo_played": demo_played,
+            "playtime_minutes": playtime_minutes,
+            "demo_conclusion": demo_conclusion,
+            "first_5min_experience": first_5min_experience,
+            "first_15min_experience": first_15min_experience,
+            "first_30min_experience": first_30min_experience,
+            "tutorial_issue": tutorial_issue,
+            "control_issue": control_issue,
+            "combat_or_system_issue": combat_or_system_issue,
+            "localization_issue": localization_issue,
+            "performance_issue": performance_issue,
+            "core_loop_clarity": core_loop_clarity,
+            "content_depth": content_depth,
+            "video_hook": video_hook,
+            "china_player_reaction": china_player_reaction,
+        }
+        update_project_fields(CSV_PATH, selected_project["record_id"], updates)
+        st.success("Demo 试玩记录已保存。")
+
+        if save_demo_and_report:
+            refreshed_row = load_project_row(selected_project["record_id"])
+            render_report_result(project_from_row(refreshed_row))
+
+
+def render_candidate_finder(target_game_name: str, target_appid: str) -> None:
+    """渲染竞品候选发现器。"""
+    with st.expander("竞品候选发现器", expanded=False):
+        st.caption("这里只生成搜索链接和候选池，不会自动确认竞品。")
+
+        search_col1, search_col2 = st.columns(2)
+        with search_col1:
+            primary_tags = st.text_input("核心标签，可用逗号、顿号、空格或换行分隔", key="candidate_primary_tags")
+            gameplay_keywords = st.text_input("玩法关键词，可用逗号、顿号、空格或换行分隔", key="candidate_gameplay_keywords")
+            english_keywords = st.text_input("英文搜索关键词，可选", key="candidate_english_keywords")
+        with search_col2:
+            reference_games = st.text_area("用户已知参考游戏，可选", height=110, key="candidate_reference_games")
+
+        search_links = generate_steam_search_links(
+            target_game_name,
+            primary_tags,
+            gameplay_keywords,
+            reference_games,
+            english_keywords,
+        )
+        if search_links:
+            st.markdown("**Steam 搜索链接**")
+            for link in search_links:
+                st.markdown(f"- {link['source_type']}：[{link['term']}]({link['url']})")
+
+    with st.expander("手动添加候选", expanded=False):
+        with st.form("candidate_form"):
+            cand_col1, cand_col2 = st.columns(2)
+            with cand_col1:
+                candidate_name = st.text_input("候选游戏名")
+                candidate_steam_url = st.text_input("候选 Steam 链接")
+                candidate_appid = st.text_input("候选 AppID")
+                source_type = st.selectbox("来源类型", ["标签搜索", "关键词搜索", "用户手动添加"])
+            with cand_col2:
+                match_reason = st.text_area(
+                    "为什么可能是竞品",
+                    height=100,
+                    help="这个竞品为什么对目标项目有参考价值",
+                )
+                notes = st.text_area("备注", height=100)
+            save_candidate = st.form_submit_button("保存候选")
+
+    if save_candidate:
+        if not target_game_name.strip() and not target_appid.strip():
+            st.error("请填写候选目标游戏名或目标 AppID。")
+        elif not candidate_name.strip():
+            st.error("请至少填写候选游戏名。")
+        else:
+            candidate = build_candidate_from_form(
+                {
+                    "target_game_name": target_game_name,
+                    "target_appid": target_appid,
+                    "candidate_name": candidate_name,
+                    "candidate_steam_url": candidate_steam_url,
+                    "candidate_appid": candidate_appid,
+                    "source_type": source_type,
+                    "match_reason": match_reason,
+                    "user_decision": "待确认",
+                    "notes": notes,
+                }
+            )
+            candidate_csv_path = save_candidate_to_csv(candidate, CANDIDATE_CSV_PATH)
+            st.success(f"候选记录已保存：{candidate_csv_path}")
+
+    render_candidate_pool(target_appid, target_game_name)
+
+
+def render_candidate_pool(target_appid: str, target_game_name: str) -> None:
+    """折叠展示当前项目候选池。"""
+    all_candidates = filter_candidates(load_candidates(CANDIDATE_CSV_PATH), "", target_game_name, "全部")
+    with st.expander(f"竞品候选池（共 {len(all_candidates)} 条）", expanded=False):
+        target_filter = st.text_input("按目标游戏筛选候选", value=target_game_name)
+        decision_filter = st.selectbox("候选状态筛选", ["待确认", "采纳", "排除", "全部"])
+        show_full_candidates = st.checkbox("显示完整候选字段", value=False)
+        filtered_candidates = filter_candidates(
+            load_candidates(CANDIDATE_CSV_PATH),
+            "",
+            target_filter,
+            decision_filter,
+        )
+        display_data = get_candidate_display_data(
+            CANDIDATE_CSV_PATH,
+            "",
+            target_filter,
+            decision_filter,
+            show_full=show_full_candidates,
+        )
+        if display_data.empty:
+            st.info("暂无候选记录")
+        else:
+            st.dataframe(display_data, use_container_width=True)
+            render_candidate_actions(filtered_candidates)
+
+
+def render_candidate_actions(filtered_candidates) -> None:
+    """渲染候选采纳和排除操作。"""
+    candidate_options = build_candidate_options(filtered_candidates)
+    if not candidate_options:
+        return
+
+    selected_candidate_label = st.selectbox(
+        "选择候选进行处理",
+        [option["label"] for option in candidate_options],
+        key="candidate_action_selector",
+    )
+    selected_candidate = next(option for option in candidate_options if option["label"] == selected_candidate_label)
+    candidate_row = selected_candidate["row"]
+    row_index = int(selected_candidate["row_index"])
+
+    action_col1, action_col2 = st.columns(2)
+    with action_col1:
+        if st.button("采纳为正式竞品"):
+            competitor = CompetitorRecord(
+                target_appid=str(candidate_row.get("target_appid", "")),
+                target_game_name=str(candidate_row.get("target_game_name", "")),
+                competitor_name=str(candidate_row.get("candidate_name", "")),
+                competitor_steam_url=str(candidate_row.get("candidate_steam_url", "")),
+                competitor_appid=str(candidate_row.get("candidate_appid", "")),
+                comparison_notes=str(candidate_row.get("match_reason", "")),
+            )
+            save_competitor_to_csv(competitor, COMPETITOR_CSV_PATH)
+            update_candidate_decision(CANDIDATE_CSV_PATH, row_index, "采纳")
+            st.success("候选已采纳为正式竞品。")
+    with action_col2:
+        if st.button("标记为排除"):
+            update_candidate_decision(CANDIDATE_CSV_PATH, row_index, "排除")
+            st.success("候选已标记为排除。")
+
+
+def render_competitor_section(target_game_name: str, target_appid: str) -> None:
+    """渲染竞品录入表单和当前项目竞品记录。"""
+    with st.expander("正式竞品录入", expanded=False):
+        with st.form("competitor_form"):
+            st.caption("竞品信息仅支持手动录入，不自动查竞品。")
+
+            target_col1, target_col2 = st.columns(2)
+            with target_col1:
+                form_target_game_name = st.text_input("目标游戏名", value=target_game_name)
+            with target_col2:
+                form_target_appid = st.text_input("目标游戏 AppID", value=target_appid)
+
+            col1, col2 = st.columns(2)
+            with col1:
+                competitor_name = st.text_input("竞品游戏名")
+                competitor_steam_url = st.text_input("竞品 Steam 链接")
+                competitor_appid = st.text_input("竞品 AppID")
+                competitor_developer = st.text_input("竞品开发商")
+                competitor_publisher = st.text_input("竞品发行商")
+                competitor_release_status = st.selectbox(
+                    "竞品发售状态",
+                    ["未填写", "未发售", "抢先体验", "已发售", "即将推出"],
+                )
+                competitor_price = st.text_input("竞品价格")
+                competitor_review_count = st.text_input("竞品评测数")
+                competitor_positive_rate = st.text_input("竞品好评率")
+            with col2:
+                competitor_has_demo = st.selectbox("竞品是否有 Demo", ["未确认", "是", "否"])
+                competitor_has_simplified_chinese = st.selectbox("竞品是否支持简体中文", ["未确认", "是", "否"])
+                competitor_tags = st.text_area("竞品标签", height=80)
+                competitor_core_loop = st.text_area("竞品核心玩法", height=90)
+                competitor_selling_points = st.text_area("竞品主要卖点", height=100)
+                competitor_weaknesses = st.text_area("竞品主要弱点", height=100)
+                comparison_notes = st.text_area(
+                    "对目标项目的参考意义",
+                    height=100,
+                    help="这个竞品为什么对目标项目有参考价值",
+                )
+
+            save_competitor = st.form_submit_button("保存竞品记录")
+
+    if save_competitor:
+        if not form_target_game_name.strip() and not form_target_appid.strip():
+            st.error("请填写目标游戏名或目标游戏 AppID。")
+        elif not competitor_name.strip():
+            st.error("请至少填写竞品游戏名。")
+        else:
+            competitor = build_competitor_from_form(
+                {
+                    "target_appid": form_target_appid,
+                    "target_game_name": form_target_game_name,
+                    "competitor_name": competitor_name,
+                    "competitor_steam_url": competitor_steam_url,
+                    "competitor_appid": competitor_appid,
+                    "competitor_developer": competitor_developer,
+                    "competitor_publisher": competitor_publisher,
+                    "competitor_release_status": competitor_release_status,
+                    "competitor_price": competitor_price,
+                    "competitor_review_count": competitor_review_count,
+                    "competitor_positive_rate": competitor_positive_rate,
+                    "competitor_has_demo": competitor_has_demo,
+                    "competitor_has_simplified_chinese": competitor_has_simplified_chinese,
+                    "competitor_tags": competitor_tags,
+                    "competitor_core_loop": competitor_core_loop,
+                    "competitor_selling_points": competitor_selling_points,
+                    "competitor_weaknesses": competitor_weaknesses,
+                    "comparison_notes": comparison_notes,
+                }
+            )
+            competitor_csv_path = save_competitor_to_csv(competitor, COMPETITOR_CSV_PATH)
+            st.success(f"竞品记录已保存：{competitor_csv_path}")
+
+    st.subheader("当前项目竞品记录")
+    show_full_competitors = st.checkbox("显示完整竞品字段", value=False)
+    display_data = get_competitor_display_data(
+        COMPETITOR_CSV_PATH,
+        target_appid,
+        target_game_name,
+        show_full=show_full_competitors,
+    )
+    if display_data.empty:
+        st.info("暂无竞品记录")
+    else:
+        st.dataframe(display_data, use_container_width=True)
+
+
+def render_competitor_candidate_page() -> None:
+    """渲染竞品与候选页。"""
+    st.subheader("竞品与候选")
+
+    project_options = get_project_options()
+    selected_label = st.selectbox(
+        "选择目标项目",
+        [option["label"] for option in project_options],
+        key="competition_target_selector",
+    )
+    selected_project = next(option for option in project_options if option["label"] == selected_label)
+
+    manual_col1, manual_col2 = st.columns(2)
+    with manual_col1:
+        target_game_name = st.text_input(
+            "目标游戏名",
+            value=selected_project["game_name"],
+            key="competition_target_game_name",
+        )
+    with manual_col2:
+        target_appid = st.text_input(
+            "目标 AppID",
+            value=selected_project["appid"],
+            key="competition_target_appid",
+        )
+
+    render_candidate_finder(target_game_name, target_appid)
+    render_competitor_section(target_game_name, target_appid)
+
+
+SEARCH_FIELD_KEYS = {
+    "game_name": "search_game_name",
+    "steam_url": "search_steam_url",
+    "short_description": "search_short_description",
+    "tags": "search_tags",
+    "core_keywords": "search_core_keywords",
+    "theme_keywords": "search_theme_keywords",
+    "english_keywords": "search_english_keywords",
+    "reference_games": "search_reference_games",
+    "developer": "search_developer",
+    "publisher": "search_publisher",
+}
+
+
+def ensure_search_center_state() -> None:
+    """初始化搜索中心输入状态。"""
+    for field_name, state_key in SEARCH_FIELD_KEYS.items():
+        st.session_state.setdefault(state_key, "")
+    st.session_state.setdefault("search_keyword_limit", 20)
+
+
+def apply_search_center_values(values: dict) -> None:
+    """把示例或项目历史数据写入搜索中心输入状态。"""
+    for field_name, state_key in SEARCH_FIELD_KEYS.items():
+        st.session_state[state_key] = str(values.get(field_name, "") or "")
+
+
+def build_search_input_from_state() -> SearchCenterInput:
+    """从页面状态构造搜索中心输入。"""
+    return SearchCenterInput(
+        game_name=st.session_state.get("search_game_name", ""),
+        steam_url=st.session_state.get("search_steam_url", ""),
+        short_description=st.session_state.get("search_short_description", ""),
+        tags=st.session_state.get("search_tags", ""),
+        core_keywords=st.session_state.get("search_core_keywords", ""),
+        theme_keywords=st.session_state.get("search_theme_keywords", ""),
+        english_keywords=st.session_state.get("search_english_keywords", ""),
+        reference_games=st.session_state.get("search_reference_games", ""),
+        developer=st.session_state.get("search_developer", ""),
+        publisher=st.session_state.get("search_publisher", ""),
+    )
+
+
+def build_links_v031a(keyword: str) -> dict:
+    """生成 V0.31a 搜索链接，使用 %20 URL 编码。"""
+    encoded_keyword = quote(keyword, safe="")
+    return {
+        "Steam 搜索链接": f"https://store.steampowered.com/search/?term={encoded_keyword}",
+        "Google 链接": f"https://www.google.com/search?q={encoded_keyword}",
+        "百度链接": f"https://www.baidu.com/s?wd={encoded_keyword}",
+        "Google Steam 链接": (
+            f"https://www.google.com/search?q=site%3Astore.steampowered.com+{encoded_keyword}"
+        ),
+        "YouTube 链接": f"https://www.youtube.com/results?search_query={encoded_keyword}",
+        "B站链接": f"https://search.bilibili.com/all?keyword={encoded_keyword}",
+        "Reddit 链接": f"https://www.reddit.com/search/?q={encoded_keyword}",
+        "itch 链接": f"https://itch.io/search?q={encoded_keyword}",
+        "IGDB 链接": f"https://www.igdb.com/search?type=1&q={encoded_keyword}",
+        "SteamDB 链接": f"https://steamdb.info/search/?a=app&q={encoded_keyword}",
+        "小黑盒站内搜索": f"https://www.baidu.com/s?wd=site%3Awww.xiaoheihe.cn+{encoded_keyword}",
+        "游民星空站内搜索": f"https://www.baidu.com/s?wd=site%3Agamersky.com+{encoded_keyword}",
+        "游侠站内搜索": f"https://www.baidu.com/s?wd=site%3Aali213.net+{encoded_keyword}",
+    }
+
+
+def build_open_link_table(keywords: list[str]) -> pd.DataFrame:
+    """为每个关键词和平台生成一行可勾选打开的链接。"""
+    rows = []
+    for keyword in keywords:
+        links = build_links_v031a(keyword)
+        for label in DOMESTIC_LINK_LABELS:
+            rows.append(
+                {
+                    "打开": False,
+                    "分组": "国内搜索优先",
+                    "平台": label,
+                    "关键词": keyword,
+                    "链接": links[LINK_LABEL_TO_COLUMN[label]],
+                }
+            )
+        for label in OVERSEAS_LINK_LABELS:
+            rows.append(
+                {
+                    "打开": False,
+                    "分组": "海外搜索优先",
+                    "平台": label,
+                    "关键词": keyword,
+                    "链接": links[LINK_LABEL_TO_COLUMN[label]],
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def upgrade_search_tables_v031a(competitor_table, presence_table) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """补齐 V0.31a 新链接列，并把链接统一为 %20 编码。"""
+    upgraded_competitor = competitor_table.copy()
+    upgraded_presence = presence_table.copy()
+
+    for index, row in upgraded_competitor.iterrows():
+        links = build_links_v031a(str(row.get("关键词", "")))
+        for column in [
+            "Steam 搜索链接",
+            "Google 链接",
+            "百度链接",
+            "Google Steam 链接",
+            "IGDB 链接",
+            "SteamDB 链接",
+            "小黑盒站内搜索",
+            "游民星空站内搜索",
+            "游侠站内搜索",
+        ]:
+            upgraded_competitor.loc[index, column] = links[column]
+
+    for index, row in upgraded_presence.iterrows():
+        links = build_links_v031a(str(row.get("关键词", "")))
+        for column in [
+            "百度链接",
+            "YouTube 链接",
+            "B站链接",
+            "Reddit 链接",
+            "itch 链接",
+            "Google 链接",
+            "Steam 搜索链接",
+            "SteamDB 链接",
+            "IGDB 链接",
+            "小黑盒站内搜索",
+            "游民星空站内搜索",
+            "游侠站内搜索",
+        ]:
+            upgraded_presence.loc[index, column] = links[column]
+
+    return upgraded_competitor, upgraded_presence
+
+
+def save_search_tables_v031a(
+    competitor_table: pd.DataFrame,
+    presence_table: pd.DataFrame,
+    export_dir: Path,
+) -> tuple[Path, Path]:
+    """保存 V0.31a 搜索中心 CSV，并兼容旧导出文件缺列。"""
+    export_dir.mkdir(parents=True, exist_ok=True)
+    competitor_path = export_dir / "competitor_search_links.csv"
+    presence_path = export_dir / "platform_presence_search_links.csv"
+    append_csv_v031a(competitor_table, competitor_path, COMPETITOR_SEARCH_COLUMNS)
+    append_csv_v031a(presence_table, presence_path, PLATFORM_PRESENCE_COLUMNS)
+    return competitor_path, presence_path
+
+
+def append_csv_v031a(data: pd.DataFrame, csv_path: Path, columns: list[str]) -> None:
+    """追加 UTF-8-SIG CSV；旧文件缺列时先补齐。"""
+    if csv_path.exists():
+        try:
+            existing_data = pd.read_csv(csv_path, encoding="utf-8-sig", dtype=str, keep_default_na=False)
+        except pd.errors.EmptyDataError:
+            existing_data = pd.DataFrame(columns=columns)
+        changed = False
+        for column in columns:
+            if column not in existing_data.columns:
+                existing_data[column] = ""
+                changed = True
+        if changed:
+            extra_columns = [column for column in existing_data.columns if column not in columns]
+            existing_data.to_csv(csv_path, columns=columns + extra_columns, index=False, encoding="utf-8-sig")
+
+    output = data.copy()
+    for column in columns:
+        if column not in output.columns:
+            output[column] = ""
+    output.loc[:, columns].to_csv(
+        csv_path,
+        mode="a",
+        header=not csv_path.exists(),
+        index=False,
+        encoding="utf-8-sig",
+    )
+
+
+def render_search_center_page() -> None:
+    """渲染半自动搜索中心。"""
+    ensure_search_center_state()
+
+    st.subheader("搜索中心 / Search Center")
+    st.caption(
+        "本模块只生成搜索入口，不自动抓取结果。国内平台默认使用百度站内搜索，"
+        "港澳台和海外平台默认使用 Google 或平台原生搜索。备用搜索引擎可手动展开。"
+    )
+    st.info(
+        "原生搜索：直接使用平台自己的搜索链接。站内搜索：通过百度/Google 限定站点搜索，"
+        "适用于没有稳定公开搜索页的平台。手动平台：暂不自动生成稳定链接，只给出检查提醒。"
+    )
+
+    action_col1, action_col2 = st.columns([1, 2])
+    with action_col1:
+        if st.button("填入示例：We Need An Army"):
+            apply_search_center_values(EXAMPLE_INPUT)
+            st.rerun()
+    with action_col2:
+        project_options = get_saved_project_options()
+        if project_options:
+            selected_label = st.selectbox(
+                "从已保存项目带入",
+                [option["label"] for option in project_options],
+                key="search_project_selector",
+            )
+            selected_project = next(option for option in project_options if option["label"] == selected_label)
+            if st.button("生成搜索中心链接（带入当前项目）"):
+                project_row = load_project_row(selected_project["record_id"])
+                if project_row is not None:
+                    apply_search_center_values(
+                        {
+                            "game_name": project_row.get("game_name", ""),
+                            "steam_url": project_row.get("steam_url", ""),
+                            "short_description": project_row.get("core_loop", ""),
+                            "tags": project_row.get("genre_tags", ""),
+                            "core_keywords": project_row.get("core_loop", ""),
+                            "english_keywords": "",
+                            "developer": project_row.get("developer", ""),
+                            "publisher": project_row.get("publisher", ""),
+                        }
+                    )
+                    st.rerun()
+        else:
+            st.info("暂无已保存项目，可先使用独立输入或示例测试。")
+
+    with st.form("search_center_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            st.text_input("游戏名 game_name（必填）", key="search_game_name")
+            st.text_input("Steam URL steam_url（可选）", key="search_steam_url")
+            st.text_area("英文简介 short_description（可选）", height=90, key="search_short_description")
+            st.text_input("Steam 标签 tags（逗号分隔）", key="search_tags")
+            st.text_input("核心玩法关键词 core_keywords（逗号分隔）", key="search_core_keywords")
+        with col2:
+            st.text_input("题材关键词 theme_keywords（逗号分隔）", key="search_theme_keywords")
+            st.text_input("英文关键词 english_keywords（逗号分隔）", key="search_english_keywords")
+            st.text_input("参考游戏 reference_games（逗号分隔）", key="search_reference_games")
+            st.text_input("开发商 developer（可选）", key="search_developer")
+            st.text_input("发行商 publisher（可选）", key="search_publisher")
+            st.number_input(
+                "keyword_set 最大保留条数",
+                min_value=1,
+                max_value=50,
+                step=1,
+                key="search_keyword_limit",
+            )
+
+        generate_tables = st.form_submit_button("生成搜索链接表")
+
+    if generate_tables:
+        search_input = build_search_input_from_state()
+        if not search_input.game_name.strip():
+            st.error("请至少填写游戏名 game_name。")
+        else:
+            try:
+                platforms = load_search_platforms(SEARCH_PLATFORM_CONFIG_PATH)
+                navigation_table = build_platform_navigation(
+                    search_input,
+                    platforms,
+                    limit=int(st.session_state.get("search_keyword_limit", 20)),
+                )
+            except Exception as exc:
+                st.error(f"搜索中心生成失败，不影响其他功能：{exc}")
+            else:
+                st.session_state["search_navigation_table"] = navigation_table
+                keyword_count = navigation_table["搜索词"].nunique() if not navigation_table.empty else 0
+                row_count = len(navigation_table)
+                st.success(f"已生成 {keyword_count} 条 keyword_set，合并为 {row_count} 条平台搜索导航。")
+
+    render_search_center_tables()
+
+
+def render_search_center_tables() -> None:
+    """渲染平台搜索导航。"""
+    navigation_table = st.session_state.get("search_navigation_table")
+    if navigation_table is None or navigation_table.empty:
+        return
+
+    recommended_rows = get_recommended_search_rows(navigation_table)
+    render_search_summary(navigation_table, recommended_rows)
+
+    show_fallback_engines = st.checkbox(
+        "显示备用搜索引擎",
+        value=False,
+        key="search_show_fallback_engines",
+        help="默认只显示推荐搜索。勾选后显示 Google/百度等备用站内搜索入口。",
+    )
+    search_display_mode = st.radio(
+        "搜索显示模式",
+        ["精简模式", "标准模式", "完整模式"],
+        horizontal=True,
+        key="search_display_mode",
+        help="精简模式减少默认展示量；完整模式仍保留全部搜索导航，但按分区折叠。",
+    )
+
+    with st.expander(f"推荐优先搜索（{len(recommended_rows)} 条）", expanded=True):
+        render_platform_navigation_section(
+            recommended_rows,
+            "推荐优先搜索",
+            show_fallback_engines,
+            group_by_platform=False,
+        )
+
+    st.divider()
+
+    for section_name in SEARCH_CENTER_SECTION_ORDER:
+        section_rows = navigation_table.loc[navigation_table["分区"] == section_name].copy()
+        if section_rows.empty:
+            continue
+        display_rows, current_count = limit_navigation_rows_for_mode(section_rows, search_display_mode)
+        with st.expander(f"{section_name}（共 {len(section_rows)} 条，当前显示 {current_count} 条）", expanded=False):
+            render_platform_navigation_section(
+                display_rows,
+                section_name,
+                show_fallback_engines,
+                group_by_platform=True,
+            )
+            if current_count < len(section_rows):
+                show_all_key = f"search_show_all_{section_name}"
+                if st.checkbox("显示该分区全部", key=show_all_key):
+                    render_platform_navigation_section(
+                        section_rows,
+                        f"{section_name} 全部",
+                        show_fallback_engines,
+                        group_by_platform=True,
+                    )
+
+    render_batch_open_links(navigation_table, recommended_rows, show_fallback_engines)
+
+    with st.expander("显示完整链接", expanded=False):
+        flat_links = expand_links_for_display(navigation_table, include_fallback=show_fallback_engines)
+        st.dataframe(
+            flat_links,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    if st.button("导出搜索导航 CSV"):
+        try:
+            SEARCH_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+            export_path = SEARCH_EXPORT_DIR / "search_navigation_links.csv"
+            prepare_navigation_for_csv(navigation_table).to_csv(export_path, index=False, encoding="utf-8-sig")
+        except Exception as exc:
+            st.error(f"搜索中心导出失败，不影响其他功能：{exc}")
+        else:
+            st.success(f"搜索导航 CSV 已导出：{export_path}")
+
+    if st.button("导出推荐搜索 CSV"):
+        try:
+            SEARCH_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+            export_path = SEARCH_EXPORT_DIR / "search_navigation_recommended.csv"
+            prepare_navigation_for_csv(recommended_rows).to_csv(export_path, index=False, encoding="utf-8-sig")
+        except Exception as exc:
+            st.error(f"推荐搜索导出失败，不影响其他功能：{exc}")
+        else:
+            st.success(f"推荐搜索 CSV 已导出：{export_path}")
+
+
+def render_search_summary(navigation_table: pd.DataFrame, recommended_rows: pd.DataFrame) -> None:
+    """Render compact search-center summary metrics before long lists."""
+    keyword_count = navigation_table["搜索词"].nunique()
+    total_count = len(navigation_table)
+    domestic_platform_count = navigation_table.loc[
+        navigation_table["区域"].eq("国内"),
+        "平台名",
+    ].nunique()
+    overseas_platform_count = navigation_table.loc[
+        navigation_table["区域"].isin(["港澳台", "海外/全球", "日本", "韩国", "其他"]),
+        "平台名",
+    ].nunique()
+
+    metric_cols = st.columns(5)
+    metric_cols[0].metric("keyword_set", keyword_count)
+    metric_cols[1].metric("搜索导航", total_count)
+    metric_cols[2].metric("推荐入口", len(recommended_rows))
+    metric_cols[3].metric("国内平台", domestic_platform_count)
+    metric_cols[4].metric("港澳台/海外平台", overseas_platform_count)
+
+    recommended_names = [
+        platform for platform in SEARCH_RECOMMENDED_PLATFORMS if platform in set(recommended_rows["平台名"].tolist())
+    ]
+    st.info(
+        f"已生成 {keyword_count} 条 keyword_set，{total_count} 条平台搜索导航。"
+        f"推荐先看：{'、'.join(recommended_names)}。"
+    )
+
+
+def get_search_context() -> dict:
+    """Read the current search form context used only for display prioritization."""
+    game_name = str(st.session_state.get("search_game_name", "")).strip()
+    developer = str(st.session_state.get("search_developer", "")).strip()
+    core_keywords = [
+        term.strip()
+        for term in str(st.session_state.get("search_core_keywords", "")).replace("，", ",").split(",")
+        if term.strip()
+    ]
+    english_keywords = [
+        term.strip()
+        for term in str(st.session_state.get("search_english_keywords", "")).replace("，", ",").split(",")
+        if term.strip()
+    ]
+    return {
+        "game_name": game_name,
+        "developer": developer,
+        "core_keywords": core_keywords,
+        "english_keywords": english_keywords,
+    }
+
+
+def build_core_keyword_order() -> list[str]:
+    """Build keyword order for display limits without changing generated keywords."""
+    context = get_search_context()
+    game_name = context["game_name"]
+    developer = context["developer"]
+    ordered_keywords = []
+    for template in SEARCH_CORE_KEYWORDS:
+        keyword = template.format(game_name=game_name, developer=developer).strip()
+        if keyword and keyword not in ordered_keywords:
+            ordered_keywords.append(keyword)
+    for keyword in context["core_keywords"] + context["english_keywords"]:
+        if keyword not in ordered_keywords:
+            ordered_keywords.append(keyword)
+    return ordered_keywords
+
+
+def keyword_display_rank(keyword: str) -> int:
+    """Rank core keywords before less important generated keywords."""
+    ordered_keywords = build_core_keyword_order()
+    normalized = str(keyword).casefold()
+    for index, core_keyword in enumerate(ordered_keywords):
+        if normalized == core_keyword.casefold():
+            return index
+    return len(ordered_keywords) + 100
+
+
+def get_recommended_search_rows(navigation_table: pd.DataFrame, limit: int = 12) -> pd.DataFrame:
+    """Return the default high-signal search rows."""
+    platform_rank = {platform: index for index, platform in enumerate(SEARCH_RECOMMENDED_PLATFORMS)}
+    candidates = navigation_table.loc[navigation_table["平台名"].isin(platform_rank)].copy()
+    if candidates.empty:
+        return candidates
+    candidates["_platform_rank"] = candidates["平台名"].map(platform_rank)
+    candidates["_keyword_rank"] = candidates["搜索词"].apply(keyword_display_rank)
+    candidates = candidates.sort_values(["_platform_rank", "_keyword_rank", "搜索词"])
+    candidates = candidates.drop_duplicates("平台名", keep="first").head(limit)
+    return candidates.drop(columns=["_platform_rank", "_keyword_rank"], errors="ignore")
+
+
+def limit_navigation_rows_for_mode(section_rows: pd.DataFrame, display_mode: str) -> tuple[pd.DataFrame, int]:
+    """Limit rows for collapsed sections according to selected display mode."""
+    limits = SEARCH_MODE_LIMITS.get(display_mode, SEARCH_MODE_LIMITS["精简模式"])
+    per_platform_limit = limits["per_platform"]
+    section_limit = limits["section"]
+    if per_platform_limit is None:
+        return section_rows, len(section_rows)
+
+    ranked = section_rows.copy()
+    ranked["_keyword_rank"] = ranked["搜索词"].apply(keyword_display_rank)
+    ranked = ranked.sort_values(["平台名", "_keyword_rank", "搜索词"])
+    limited = ranked.groupby("平台名", group_keys=False).head(per_platform_limit)
+    limited = limited.sort_values(["平台名", "_keyword_rank", "搜索词"])
+    if section_limit is not None:
+        limited = limited.head(section_limit)
+    limited = limited.drop(columns=["_keyword_rank"], errors="ignore")
+    return limited, len(limited)
+
+
+def render_platform_navigation_section(
+    section_rows: pd.DataFrame,
+    section_name: str,
+    show_fallback_engines: bool,
+    group_by_platform: bool = True,
+) -> None:
+    """以平台导航形式展示一个分区。"""
+    st.caption(f"{section_name}：按平台 + 搜索词合并展示，默认只显示推荐搜索入口。")
+    if group_by_platform:
+        for platform_name, platform_rows in section_rows.groupby("平台名", sort=False):
+            st.markdown(f"**{platform_name}（{len(platform_rows)} 条）**")
+            render_navigation_rows(platform_rows, show_fallback_engines)
+    else:
+        render_navigation_rows(section_rows, show_fallback_engines)
+
+
+def render_navigation_rows(section_rows: pd.DataFrame, show_fallback_engines: bool) -> None:
+    """Render compact row list without exposing raw URLs."""
+    for row_index, row in section_rows.reset_index(drop=True).iterrows():
+        cols = st.columns([1.2, 0.8, 2.0, 1.0, 2.0])
+        with cols[0]:
+            st.write(str(row.get("平台名", "")))
+        with cols[1]:
+            st.caption(str(row.get("区域", "")))
+        with cols[2]:
+            st.write(str(row.get("搜索词", "")))
+        with cols[3]:
+            st.write(str(row.get("搜索类型", "")))
+        with cols[4]:
+            render_row_link_buttons(row, show_fallback_engines)
+        note = str(row.get("说明", "")).strip()
+        if note and row_index < 3:
+            st.caption(note)
+
+
+def render_row_link_buttons(row: pd.Series, show_fallback_engines: bool) -> None:
+    """Render recommended and optional fallback link buttons for one merged row."""
+    links = list(row.get("推荐链接", []) or [])
+    if show_fallback_engines:
+        links.extend(list(row.get("备用链接", []) or []))
+    if not links:
+        st.caption(str(row.get("说明", "手动检查")))
+        return
+
+    button_columns = st.columns(min(len(links), 3))
+    for index, link in enumerate(links):
+        with button_columns[index % len(button_columns)]:
+            st.link_button(
+                format_link_button_label(link),
+                str(link.get("url", "")),
+                use_container_width=True,
+            )
+
+
+def format_link_button_label(link: dict) -> str:
+    """Build compact button labels for row actions."""
+    engine = str(link.get("engine", ""))
+    labels = {
+        "native": "打开原生",
+        "baidu": "打开百度",
+        "google": "打开Google",
+    }
+    return labels.get(engine, f"打开{link.get('label', '搜索')}")
+
+
+def collect_links_for_rows(rows: pd.DataFrame, include_fallback: bool) -> list[str]:
+    """Collect URLs from merged navigation rows."""
+    urls = []
+    for _, row in rows.iterrows():
+        link_groups = [row.get("推荐链接", [])]
+        if include_fallback:
+            link_groups.append(row.get("备用链接", []))
+        for links in link_groups:
+            if not isinstance(links, list):
+                continue
+            for link in links:
+                url = str(link.get("url", "")).strip()
+                if url:
+                    urls.append(url)
+    return urls
+
+
+def render_batch_open_links(
+    navigation_table: pd.DataFrame,
+    recommended_rows: pd.DataFrame,
+    show_fallback_engines: bool,
+) -> None:
+    """按分类筛选后批量打开链接。"""
+    with st.expander("批量打开链接", expanded=False):
+        batch_scope = st.radio(
+            "选择批量打开范围",
+            ["推荐优先链接", "当前分区链接", "当前平台链接", "全部链接"],
+            horizontal=True,
+            key="search_batch_scope",
+        )
+        if batch_scope == "推荐优先链接":
+            filtered_links = recommended_rows.copy()
+        elif batch_scope == "当前分区链接":
+            selected_section = st.selectbox(
+                "选择分区",
+                [section for section in SEARCH_CENTER_SECTION_ORDER if section in set(navigation_table["分区"])],
+                key="search_batch_section",
+            )
+            filtered_links = navigation_table.loc[navigation_table["分区"].eq(selected_section)].copy()
+        elif batch_scope == "当前平台链接":
+            selected_platform = st.selectbox(
+                "选择平台",
+                sorted(navigation_table["平台名"].dropna().unique().tolist()),
+                key="search_batch_platform",
+            )
+            filtered_links = navigation_table.loc[navigation_table["平台名"].eq(selected_platform)].copy()
+        else:
+            st.warning("全部链接数量较多，建议只在确实需要时使用。")
+            filtered_links = navigation_table.copy()
+
+        if filtered_links.empty:
+            st.info("当前范围暂无可打开链接。")
+            return
+
+        filtered_links = filtered_links.reset_index(drop=True)
+        batch_columns = ["打开", "分区", "平台名", "区域", "搜索词", "搜索类型", "推荐搜索"]
+        if show_fallback_engines:
+            batch_columns.append("备用搜索")
+        edited_open_link_table = st.data_editor(
+            filtered_links.loc[:, batch_columns],
+            use_container_width=True,
+            hide_index=True,
+            column_order=batch_columns,
+            column_config={
+                "打开": st.column_config.CheckboxColumn("打开"),
+                "分区": st.column_config.TextColumn("分区", disabled=True),
+                "平台名": st.column_config.TextColumn("平台名", disabled=True),
+                "区域": st.column_config.TextColumn("区域", disabled=True),
+                "搜索词": st.column_config.TextColumn("搜索词", disabled=True),
+                "搜索类型": st.column_config.TextColumn("搜索类型", disabled=True),
+                "推荐搜索": st.column_config.TextColumn("推荐搜索", disabled=True),
+                "备用搜索": st.column_config.TextColumn("备用搜索", disabled=True),
+            },
+            key="search_batch_open_editor",
+        )
+
+        selected_mask = edited_open_link_table["打开"].astype(bool)
+        selected_rows = filtered_links.loc[selected_mask].copy()
+        selected_links = collect_links_for_rows(selected_rows, include_fallback=show_fallback_engines)
+
+        selected_count = len(selected_links)
+        confirm_over_limit = False
+        if selected_count > 10:
+            st.warning("你将打开超过 10 个浏览器标签页，默认只打开前 10 个。")
+            confirm_over_limit = st.checkbox("确认继续打开全部选中链接")
+
+        if st.button(f"打开选中链接（{selected_count}）"):
+            if selected_count == 0:
+                st.info("请先在上方表格勾选要打开的链接。")
+                return
+
+            links_to_open = selected_links if confirm_over_limit or selected_count <= 10 else selected_links[:10]
+            for url in links_to_open:
+                webbrowser.open_new_tab(url)
+            st.success(f"已提交打开 {len(links_to_open)} 个浏览器标签页。")
+            if selected_count > len(links_to_open):
+                st.info("还有未打开的链接；勾选确认后可一次打开全部。")
+
+
+def get_steamdb_common_link_groups() -> dict[str, list[tuple[str, str]]]:
+    """Return the SteamDB discovery links shared by Home and SteamDB tabs."""
+    current_year = datetime.now().year
+    return {
+        "新作发现": [
+            (f"Top Rated Releases {current_year}", f"https://steamdb.info/stats/gameratings/{current_year}/"),
+            ("Top Rated Releases 2025", "https://steamdb.info/stats/gameratings/2025/"),
+            ("Top Rated Releases 2027", "https://steamdb.info/stats/gameratings/2027/"),
+            ("Upcoming Releases", "https://steamdb.info/upcoming/"),
+            ("Release Calendar", "https://steamdb.info/calendar/"),
+        ],
+        "热度观察": [
+            ("Live Player Charts", "https://steamdb.info/charts/"),
+            ("Trending Followers", "https://steamdb.info/stats/trendingfollowers/"),
+            ("Wishlist Activity", "https://steamdb.info/stats/wishlistactivity/"),
+            ("Most Wishlisted", "https://steamdb.info/stats/mostwished/"),
+            ("Global Top Sellers", "https://steamdb.info/stats/globaltopsellers/"),
+            ("Weekly Top Sellers", "https://steamdb.info/topsellers/"),
+        ],
+        "活动 / 新品节": [
+            ("活动入口：Steam Release Calendar", "https://steamdb.info/calendar/"),
+            ("活动入口：Upcoming Releases", "https://steamdb.info/upcoming/"),
+            ("活动入口：Wishlist Activity", "https://steamdb.info/stats/wishlistactivity/"),
+            ("活动入口：Trending Followers", "https://steamdb.info/stats/trendingfollowers/"),
+        ],
+    }
+
+
+def get_steam_news_links() -> list[tuple[str, str]]:
+    return [
+        ("Steam 商店首页", "https://store.steampowered.com/"),
+        ("Steam News Hub", "https://store.steampowered.com/news/"),
+        ("Steam Specials / 折扣活动", "https://store.steampowered.com/specials"),
+        ("Steam Upcoming Events", "https://partner.steamgames.com/doc/marketing/upcoming_events"),
+    ]
+
+
+def render_home_dashboard_page() -> None:
+    """Render the daily intelligence dashboard."""
+    ensure_daily_watch_csv_exists(DAILY_WATCH_CSV_PATH)
+    ensure_home_snapshot_csv_exists(HOME_SNAPSHOT_CSV_PATH)
+    HOME_SNAPSHOT_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_template_csv_exists(STEAMDB_TEMPLATE_CSV_PATH)
+    ensure_watch_note_csv_exists(STEAMDB_WATCH_NOTE_CSV_PATH)
+    ensure_candidate_csv_exists(CANDIDATE_CSV_PATH)
+    ensure_csv_exists(CSV_PATH)
+
+    render_pending_home_target_notice()
+
+    st.subheader("今日新游雷达")
+    st.caption("优先展示即将推出、近期上架和热度异常项目；热销老游戏仅作为趋势参考。")
+
+    projects = load_projects(CSV_PATH, include_deleted=True)
+    active_projects = projects.loc[projects["is_deleted"].astype(str).str.casefold() != "true"].copy()
+    snapshots = load_home_snapshots(HOME_SNAPSHOT_CSV_PATH)
+    daily_notes = load_daily_watch_notes(DAILY_WATCH_CSV_PATH)
+    steamdb_notes = load_watch_notes(STEAMDB_WATCH_NOTE_CSV_PATH)
+    candidates = load_candidates(CANDIDATE_CSV_PATH)
+    pending_projects = filter_pending_projects(active_projects)
+    header_col1, header_col2, header_col3, header_col4, header_col5 = st.columns([2, 1, 1, 1, 1])
+    with header_col1:
+        st.caption(f"最后刷新时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    with header_col2:
+        force_refresh = st.button("刷新 Steam 图文源", key="home_steam_feed_refresh", use_container_width=True)
+    with header_col3:
+        if st.button("刷新当前卡片详情", key="home_appdetails_refresh", use_container_width=True):
+            st.session_state["force_refresh_visible_appdetails"] = True
+    with header_col4:
+        if st.button("刷新当前卡片评价数据", key="home_review_stats_refresh", use_container_width=True):
+            st.session_state["force_refresh_visible_review_stats"] = True
+    with header_col5:
+        if st.button("清理无效详情缓存", key="home_appdetails_clear_invalid", use_container_width=True):
+            removed_count = clear_invalid_appdetails_cache(STEAM_APPDETAILS_CACHE_PATH)
+            st.session_state["home_appdetails_clear_message"] = f"已清理 {removed_count} 条无效 appdetails 缓存。"
+            st.rerun()
+    if st.session_state.get("home_appdetails_clear_message"):
+        st.success(st.session_state.pop("home_appdetails_clear_message"))
+    steam_feed = load_steam_store_home_feed(STEAM_HOME_FEED_CACHE_PATH, force_refresh=force_refresh)
+    feed = HomeFeedResult(message="SteamDB 自动抓取已跳过；首页只保留 SteamDB 入口卡。")
+
+    render_home_steam_store_discovery(steam_feed)
+    render_home_common_tools_grid()
+    render_home_discovery_projects(feed, snapshots, daily_notes, steamdb_notes)
+
+    project_col1, project_col2 = st.columns([1, 1])
+    with project_col1:
+        render_home_recent_projects(active_projects)
+    with project_col2:
+        render_home_pending_projects(pending_projects)
+
+    render_home_metrics(daily_notes, active_projects, pending_projects, candidates)
+
+    lower_col1, lower_col2 = st.columns([1, 1])
+    with lower_col1:
+        render_home_quick_actions()
+    with lower_col2:
+        render_home_snapshot_form()
+        render_home_daily_watch_form()
+
+    render_home_snapshot_manager(snapshots)
+    render_home_daily_watch_history(daily_notes)
+    render_home_debug_expander(feed, steam_feed)
+
+
+def render_pending_home_target_notice() -> None:
+    target = st.session_state.get("pending_home_target", "")
+    if not target:
+        return
+    label_map = {
+        "profile": "一键项目画像",
+        "steamdb": "SteamDB 发现",
+        "search": "搜索中心",
+        "history": "历史与导出",
+        "daily_watch": "今日观察记录",
+    }
+    label = label_map.get(str(target), str(target))
+    st.info(f"已发送到【{label}】，请打开对应 Tab。相关字段已预填或目标已记录。")
+
+
+def render_home_metrics(
+    daily_notes: pd.DataFrame,
+    active_projects: pd.DataFrame,
+    pending_projects: pd.DataFrame,
+    candidates: pd.DataFrame,
+) -> None:
+    today_prefix = datetime.now().strftime("%Y-%m-%d")
+    today_count = 0
+    if not daily_notes.empty and "created_at" in daily_notes.columns:
+        today_count = int(daily_notes["created_at"].astype(str).str.startswith(today_prefix).sum())
+
+    recent_7_count = 0
+    if not active_projects.empty and "created_at" in active_projects.columns:
+        created_at = pd.to_datetime(active_projects["created_at"], errors="coerce")
+        cutoff = pd.Timestamp(datetime.now() - pd.Timedelta(days=7))
+        recent_7_count = int((created_at >= cutoff).sum())
+
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("今日观察数", today_count)
+    metric_cols[1].metric("待处理项目数", len(pending_projects))
+    metric_cols[2].metric("最近 7 天新增项目数", recent_7_count)
+    metric_cols[3].metric("当前候选竞品数", 0 if candidates.empty else len(candidates))
+
+
+def render_home_feed_header(feed: HomeFeedResult) -> None:
+    info_col1, info_col2, info_col3 = st.columns([1, 1, 2])
+    info_col1.caption(f"最后刷新时间：{feed.refreshed_at or '未刷新'}")
+    info_col2.caption("数据来源：Steam / SteamDB / 本地记录")
+    if feed.message:
+        if feed.used_stale_cache:
+            info_col3.warning(feed.message)
+        elif feed.from_cache:
+            info_col3.info(feed.message)
+        elif "失败" in feed.message:
+            info_col3.warning(feed.message)
+        else:
+            info_col3.success(feed.message)
+
+
+def render_home_feed_sections(feed: HomeFeedResult) -> None:
+    st.markdown("### SteamDB / Steam 热点")
+    section_configs = [
+        ("SteamDB 热门在线", "charts", "https://steamdb.info/charts/"),
+        ("Trending Followers", "trending_followers", "https://steamdb.info/stats/trendingfollowers/"),
+        ("Wishlist / Upcoming", "wishlist", "https://steamdb.info/stats/wishlistactivity/"),
+    ]
+    columns = st.columns(3)
+    for column, (title, key, fallback_url) in zip(columns, section_configs):
+        with column:
+            render_home_feed_section_card(title, feed.sections.get(key, []), fallback_url)
+
+
+def render_home_steam_store_discovery(steam_feed: SteamStoreFeedResult) -> None:
+    cards = collect_steam_store_cards(steam_feed)
+    cards = enrich_steam_store_cards(cards, limit=20)
+    filtered_cards = apply_steam_home_filters(cards)
+    visible_cards = filtered_cards[:8]
+    if not cards:
+        visible_cards = get_home_default_entry_cards()
+    elif not visible_cards:
+        st.info("当前筛选无结果，建议放宽筛选。")
+        return
+    if st.session_state.get("home_appdetails_refresh_result"):
+        st.success(st.session_state.pop("home_appdetails_refresh_result"))
+    if st.session_state.get("home_review_stats_refresh_result"):
+        st.success(st.session_state.pop("home_review_stats_refresh_result"))
+    if steam_feed.from_cache or steam_feed.used_stale_cache:
+        st.caption("当前显示缓存数据。")
+    render_current_appdetails_debug_controls(visible_cards)
+    columns = st.columns(min(4, max(1, len(visible_cards))))
+    for index, card in enumerate(visible_cards):
+        with columns[index % len(columns)]:
+            render_home_discovery_project_card(card, index)
+
+
+def render_current_appdetails_debug_controls(visible_cards: list[dict]) -> None:
+    steam_cards = [card for card in visible_cards if card.get("card_type") == "steam_store" and card.get("appid")]
+    if not steam_cards:
+        return
+    options = []
+    appid_to_card = {}
+    for card in steam_cards:
+        appid = str(card.get("appid", "") or "").strip()
+        label = f"{card.get('game_name') or card.get('title') or appid} · {appid}"
+        options.append(label)
+        appid_to_card[label] = card
+
+    debug_col1, debug_col2 = st.columns([2, 1])
+    with debug_col1:
+        selected_label = st.selectbox("当前 AppID 调试", options, key="home_appdetails_debug_select")
+    with debug_col2:
+        if st.button("调试当前 AppID 详情", key="home_appdetails_debug_button", use_container_width=True):
+            selected_card = appid_to_card.get(selected_label, {})
+            appid = str(selected_card.get("appid", "") or "").strip()
+            if appid:
+                detail = debug_appdetails_summary(appid, STEAM_APPDETAILS_CACHE_PATH, APPDETAILS_DEBUG_DIR)
+                st.session_state["home_appdetails_debug_result"] = detail
+                st.session_state["home_appdetails_debug_file"] = str(APPDETAILS_DEBUG_DIR / f"appdetails_{appid}.json")
+
+    detail = st.session_state.get("home_appdetails_debug_result")
+    if isinstance(detail, dict) and detail.get("appid"):
+        with st.expander("当前 AppID appdetails 调试结果", expanded=True):
+            st.write(
+                {
+                    "appid": detail.get("appid"),
+                    "success": detail.get("success"),
+                    "name": detail.get("name"),
+                    "developers": detail.get("developers"),
+                    "publishers": detail.get("publishers"),
+                    "genres": detail.get("genres"),
+                    "categories": detail.get("categories"),
+                    "release_date": detail.get("release_date"),
+                    "price_overview": detail.get("price_overview"),
+                    "supported_languages_contains_schinese": detail.get("supports_schinese") == "是",
+                    "appdetails_status": detail.get("detail_fetch_status"),
+                    "cache_status": detail.get("cache_status"),
+                    "debug_file": st.session_state.get("home_appdetails_debug_file", ""),
+                }
+            )
+
+
+def collect_steam_store_cards(steam_feed: SteamStoreFeedResult) -> list[dict]:
+    cards = []
+    seen = set()
+    for group_name in ["即将推出", "近期上架", "热销 / 热门趋势", "折扣热点"]:
+        for item in steam_feed.groups.get(group_name, []):
+            key = str(item.appid or "").strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            cards.append(steam_store_item_to_card(item))
+    return cards
+
+
+def enrich_steam_store_cards(cards: list[dict], limit: int = 20) -> list[dict]:
+    enriched = []
+    stats = {"success": 0, "failed": 0, "cache_missing_fields": 0, "cache_hit": 0, "refetched": 0}
+    force_refresh = bool(st.session_state.get("force_refresh_visible_appdetails"))
+    review_stats = {"success": 0, "failed": 0, "cache_hit": 0, "refetched": 0}
+    force_review_refresh = bool(st.session_state.get("force_refresh_visible_review_stats"))
+    for index, card in enumerate(cards):
+        if index < limit and card.get("appid"):
+            detail = get_cached_appdetails_summary(
+                str(card.get("appid", "")),
+                STEAM_APPDETAILS_CACHE_PATH,
+                force_refresh=force_refresh,
+            )
+            if detail.get("success"):
+                stats["success"] += 1
+            else:
+                stats["failed"] += 1
+            if "cache_missing_fields" in str(detail.get("detail_fetch_status", "")):
+                stats["cache_missing_fields"] += 1
+            if detail.get("cache_status") == "cache_hit":
+                stats["cache_hit"] += 1
+            if detail.get("cache_status") in {"fetched", "refetched", "debug_refetched"}:
+                stats["refetched"] += 1
+            card = merge_appdetails_into_home_card(card, detail)
+            reviews = get_cached_review_stats(
+                str(card.get("appid", "")),
+                STEAM_REVIEW_STATS_CACHE_PATH,
+                force_refresh=force_review_refresh,
+            )
+            if reviews.get("success"):
+                review_stats["success"] += 1
+            else:
+                review_stats["failed"] += 1
+            if reviews.get("cache_status") == "cache_hit":
+                review_stats["cache_hit"] += 1
+            if reviews.get("cache_status") in {"fetched", "refetched"}:
+                review_stats["refetched"] += 1
+            card = merge_review_stats_into_home_card(card, reviews)
+            card = normalize_steam_card_source_group(card)
+        enriched.append(card)
+    st.session_state["home_appdetails_visible_stats"] = stats
+    st.session_state["home_review_stats_visible_stats"] = review_stats
+    if force_refresh:
+        st.session_state["home_appdetails_refresh_result"] = (
+            f"当前卡片详情刷新完成：成功 {stats['success']}，失败 {stats['failed']}，"
+            f"缺字段重取 {stats['cache_missing_fields']}。"
+        )
+        st.session_state["force_refresh_visible_appdetails"] = False
+    if force_review_refresh:
+        st.session_state["home_review_stats_refresh_result"] = (
+            f"当前卡片评价刷新完成：成功 {review_stats['success']}，失败 {review_stats['failed']}。"
+        )
+        st.session_state["force_refresh_visible_review_stats"] = False
+    return enriched
+
+
+def merge_appdetails_into_home_card(card: dict, detail: dict) -> dict:
+    merged = dict(card)
+    normalized = normalize_steam_game_data(
+        appid=str(card.get("appid", "")),
+        search_item=merged,
+        appdetails=detail,
+        review_stats={},
+    )
+    merged.update(normalized)
+    merged["tags"] = detail.get("tags_text") or "未获取"
+    merged["steam_page_date"] = detail.get("steam_page_date") or "未获取"
+    merged["steam_page_date_status"] = detail.get("steam_page_date_status") or "后续通过 SteamDB History 或人工摘录补充"
+    merged["supported_languages_summary"] = detail.get("supported_languages_summary") or "未获取"
+    merged["detail_fetch_status"] = detail.get("detail_fetch_status") or "未获取"
+    merged["appdetails_status"] = detail.get("detail_fetch_status") or "未获取"
+    merged["cache_status"] = detail.get("cache_status") or "未获取"
+    merged["discount_percent"] = detail.get("discount_percent", "")
+    if detail.get("header_image"):
+        merged["image_url"] = detail["header_image"]
+    return merged
+
+
+def merge_review_stats_into_home_card(card: dict, reviews: dict) -> dict:
+    merged = dict(card)
+    normalized = normalize_steam_game_data(
+        appid=str(card.get("appid", "")),
+        search_item=merged,
+        appdetails={},
+        review_stats=reviews,
+    )
+    for key in [
+        "review_total",
+        "review_positive",
+        "review_negative",
+        "positive_rate",
+        "review_score_desc",
+        "sample_review_count",
+        "median_playtime_hours",
+        "avg_playtime_hours",
+        "median_playtime_at_review_hours",
+        "avg_playtime_at_review_hours",
+        "review_stats_status",
+    ]:
+        merged[key] = normalized.get(key)
+    merged["review_cache_status"] = reviews.get("cache_status", "")
+    return merged
+
+
+def normalize_steam_card_source_group(card: dict) -> dict:
+    normalized = dict(card)
+    group = str(normalized.get("source_group", "") or "")
+    game_name = str(normalized.get("game_name", "") or normalized.get("title", "") or "")
+    release_date = parse_steam_release_date(normalized.get("release_date", ""))
+    today = datetime.now().date()
+
+    if group in {"Steam 新品趋势", "Steam 即将推出", "Steam 热销趋势", "Steam 折扣热点"}:
+        group = {
+            "Steam 新品趋势": "近期上架",
+            "Steam 即将推出": "即将推出",
+            "Steam 热销趋势": "热销 / 热门趋势",
+            "Steam 折扣热点": "折扣热点",
+        }[group]
+
+    if group in {"即将推出", "近期上架"} and is_known_old_major(game_name):
+        group = "热销 / 热门趋势"
+    elif release_date:
+        age_days = (today - release_date).days
+        if group == "即将推出" and age_days > 30:
+            group = "热销 / 热门趋势"
+        elif group == "近期上架":
+            if release_date > today:
+                group = "即将推出"
+            elif age_days > 180 and not is_early_access_or_upcoming(normalized):
+                group = "热销 / 热门趋势"
+
+    normalized["source_group"] = group
+    normalized["source"] = group
+    return normalized
+
+
+def parse_steam_release_date(value) -> object:
+    text = str(value or "").strip()
+    if not text or text == "未获取":
+        return None
+    match = re.search(r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日", text)
+    if match:
+        try:
+            return datetime(int(match.group(1)), int(match.group(2)), int(match.group(3))).date()
+        except ValueError:
+            return None
+    iso_match = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", text)
+    if iso_match:
+        try:
+            return datetime(int(iso_match.group(1)), int(iso_match.group(2)), int(iso_match.group(3))).date()
+        except ValueError:
+            return None
+    return None
+
+
+def is_known_old_major(game_name: str) -> bool:
+    lowered = str(game_name or "").casefold()
+    old_names = [
+        "counter-strike 2",
+        "apex legends",
+        "dota 2",
+        "pubg",
+        "grand theft auto v",
+        "gta v",
+        "rust",
+        "wallpaper engine",
+        "street fighter 6",
+        "resident evil 4",
+    ]
+    return any(name in lowered for name in old_names)
+
+
+def is_early_access_or_upcoming(card: dict) -> bool:
+    text = " ".join(
+        str(card.get(key, "") or "")
+        for key in ["game_name", "title", "genres", "categories", "release_date", "source_group", "note"]
+    ).casefold()
+    return any(marker in text for marker in ["抢先体验", "early access", "即将推出", "coming soon", "upcoming"])
+
+
+def is_old_released_game(card: dict, max_age_days: int = 180) -> bool:
+    if is_early_access_or_upcoming(card):
+        return False
+    release_date = parse_steam_release_date(card.get("release_date", ""))
+    if not release_date:
+        return False
+    return (datetime.now().date() - release_date).days > max_age_days
+
+
+def apply_steam_home_filters(cards: list[dict]) -> list[dict]:
+    if not cards:
+        return []
+    col1, col2, col3, col4, col5 = st.columns(5)
+    group_counts = {}
+    for card in cards:
+        group = str(card.get("source_group", "") or "").strip()
+        if group:
+            group_counts[group] = group_counts.get(group, 0) + 1
+    group_label_map = {
+        "即将推出": "即将推出",
+        "近期上架": "近期上架",
+        "热销 / 热门趋势": "热销 / 热门趋势",
+        "折扣热点": "折扣热点",
+    }
+    source_options = [("全部", "")]
+    for group_name, short_label in group_label_map.items():
+        count = group_counts.get(group_name, 0)
+        if count > 0:
+            source_options.append((f"{short_label}（{count}）", group_name))
+    option_labels = [label for label, _ in source_options]
+    with col1:
+        source_label = st.selectbox(
+            "显示来源",
+            option_labels,
+            key="home_steam_source_filter_v057",
+        )
+    with col2:
+        hide_big = st.checkbox("隐藏老游戏 / 已发行大作", value=True, key="home_steam_hide_big")
+    with col3:
+        only_upcoming = st.checkbox("只看即将推出", value=False, key="home_steam_only_upcoming")
+    with col4:
+        only_demo = st.checkbox("只看有 Demo", value=False, key="home_steam_only_demo")
+    with col5:
+        only_schinese = st.checkbox("只看支持简中", value=False, key="home_steam_only_schinese")
+
+    filter_col1, filter_col2, filter_col3, filter_col4, filter_col5, filter_col6 = st.columns(6)
+    with filter_col1:
+        positive_filter = st.selectbox("好评率", ["任意", "90%+", "80%+", "75%+", "65%+", "50%以下"], key="home_positive_filter_v060")
+    with filter_col2:
+        review_count_filter = st.selectbox("评测数", ["任意", "10+", "50+", "100+", "500+"], key="home_review_count_filter_v060")
+    with filter_col3:
+        playtime_filter = st.selectbox("游玩时间中位数", ["任意", "低于 1h", "1-3h", "3-10h", "10h+"], key="home_playtime_filter_v060")
+    with filter_col4:
+        discount_filter = st.selectbox("当前折扣", ["任意", "50%+", "75%+", "90%+"], key="home_discount_filter_v060")
+    with filter_col5:
+        price_filter = st.selectbox("价格", ["任意", "低于 ¥3", "低于 ¥10", "低于 ¥40", "高于 ¥40"], key="home_price_filter_v060")
+    with filter_col6:
+        strict_fields = st.checkbox("严格筛选已获取字段", value=False, key="home_strict_filter_v060")
+
+    filtered = cards
+    selected_group = next((group for label, group in source_options if label == source_label), "")
+    if selected_group:
+        filtered = [card for card in filtered if card.get("source_group") == selected_group]
+    selected_group_name = selected_group or "全部"
+    if only_upcoming:
+        filtered = [card for card in filtered if card.get("source_group") == "即将推出"]
+        selected_group_name = "即将推出"
+    raw_partition_count = len(filtered)
+    old_filtered_count = 0
+    if hide_big:
+        before_old_filter = len(filtered)
+        filtered = [
+            card
+            for card in filtered
+            if not is_known_old_major(card.get("game_name", "") or card.get("title", ""))
+            and not is_old_released_game(card)
+        ]
+        old_filtered_count = before_old_filter - len(filtered)
+    if only_demo:
+        filtered = [card for card in filtered if str(card.get("has_demo", "")).strip() == "是"]
+    if only_schinese:
+        filtered = [card for card in filtered if str(card.get("supports_schinese", "")).strip() == "是"]
+    filtered = apply_review_dimension_filters(
+        filtered,
+        positive_filter=positive_filter,
+        review_count_filter=review_count_filter,
+        playtime_filter=playtime_filter,
+        discount_filter=discount_filter,
+        price_filter=price_filter,
+        strict_fields=strict_fields,
+    )
+    st.session_state["home_steam_filter_debug"] = {
+        "current_group": selected_group_name,
+        "raw_partition_count": raw_partition_count,
+        "old_game_filtered_count": old_filtered_count,
+        "final_count": len(filtered),
+    }
+    return filtered
+
+
+def apply_review_dimension_filters(
+    cards: list[dict],
+    *,
+    positive_filter: str,
+    review_count_filter: str,
+    playtime_filter: str,
+    discount_filter: str,
+    price_filter: str,
+    strict_fields: bool,
+) -> list[dict]:
+    filtered = []
+    for card in cards:
+        if not _card_matches_positive_filter(card, positive_filter, strict_fields):
+            continue
+        if not _card_matches_review_count_filter(card, review_count_filter, strict_fields):
+            continue
+        if not _card_matches_playtime_filter(card, playtime_filter, strict_fields):
+            continue
+        if not _card_matches_discount_filter(card, discount_filter, strict_fields):
+            continue
+        if not _card_matches_price_filter(card, price_filter, strict_fields):
+            continue
+        filtered.append(card)
+    return filtered
+
+
+def _keep_missing(value, strict_fields: bool) -> bool:
+    return (value is None or value == "") and not strict_fields
+
+
+def _card_matches_positive_filter(card: dict, selected: str, strict_fields: bool) -> bool:
+    if selected == "任意":
+        return True
+    value = card.get("positive_rate")
+    if _keep_missing(value, strict_fields):
+        return True
+    try:
+        rate = float(value)
+    except (TypeError, ValueError):
+        return not strict_fields
+    if rate > 1:
+        rate /= 100
+    thresholds = {"90%+": 0.9, "80%+": 0.8, "75%+": 0.75, "65%+": 0.65}
+    if selected == "50%以下":
+        return rate < 0.5
+    return rate >= thresholds.get(selected, 0)
+
+
+def _card_matches_review_count_filter(card: dict, selected: str, strict_fields: bool) -> bool:
+    if selected == "任意":
+        return True
+    raw = card.get("review_total")
+    if _keep_missing(raw, strict_fields):
+        return True
+    try:
+        total = int(float(raw or 0))
+    except (TypeError, ValueError):
+        return not strict_fields
+    return total >= int(selected.replace("+", ""))
+
+
+def _card_matches_playtime_filter(card: dict, selected: str, strict_fields: bool) -> bool:
+    if selected == "任意":
+        return True
+    raw = card.get("median_playtime_hours")
+    if _keep_missing(raw, strict_fields):
+        return True
+    try:
+        hours = float(raw)
+    except (TypeError, ValueError):
+        return not strict_fields
+    if selected == "低于 1h":
+        return hours < 1
+    if selected == "1-3h":
+        return 1 <= hours < 3
+    if selected == "3-10h":
+        return 3 <= hours < 10
+    if selected == "10h+":
+        return hours >= 10
+    return True
+
+
+def _card_matches_discount_filter(card: dict, selected: str, strict_fields: bool) -> bool:
+    if selected == "任意":
+        return True
+    discount = parse_discount_percent(card)
+    if _keep_missing(discount, strict_fields):
+        return True
+    if discount is None:
+        return not strict_fields
+    return discount >= int(selected.replace("%+", ""))
+
+
+def _card_matches_price_filter(card: dict, selected: str, strict_fields: bool) -> bool:
+    if selected == "任意":
+        return True
+    price = parse_price_cny(card.get("price"))
+    if _keep_missing(price, strict_fields):
+        return True
+    if price is None:
+        return not strict_fields
+    if selected == "低于 ¥3":
+        return price < 3
+    if selected == "低于 ¥10":
+        return price < 10
+    if selected == "低于 ¥40":
+        return price < 40
+    if selected == "高于 ¥40":
+        return price > 40
+    return True
+
+
+def steam_search_url_for_group(group_name: str) -> str:
+    filter_map = {
+        "近期上架": "popularnew",
+        "即将推出": "popularcomingsoon",
+        "热销 / 热门趋势": "topsellers",
+        "折扣热点": "specials",
+    }
+    search_filter = filter_map.get(group_name, "popularnew")
+    return f"https://store.steampowered.com/search/?filter={search_filter}&category1=998"
+
+
+def render_home_common_entry_expander() -> None:
+    with st.expander("Steam / SteamDB 常用入口", expanded=False):
+        st.markdown("**Steam**")
+        steam_links = [
+            ("即将推出", steam_search_url_for_group("即将推出")),
+            ("近期上架", steam_search_url_for_group("近期上架")),
+            ("热销 / 热门趋势", steam_search_url_for_group("热销 / 热门趋势")),
+            ("折扣热点", steam_search_url_for_group("折扣热点")),
+            ("News Hub", "https://store.steampowered.com/news/"),
+            ("Specials", "https://store.steampowered.com/specials"),
+        ]
+        render_link_button_grid(steam_links, "home_steam_compact")
+        st.markdown("**SteamDB**")
+        steamdb_links = [
+            ("Top Rated Releases", f"https://steamdb.info/stats/gameratings/{datetime.now().year}/"),
+            ("Trending Followers", "https://steamdb.info/stats/trendingfollowers/"),
+            ("Wishlist Activity", "https://steamdb.info/stats/wishlistactivity/"),
+            ("Most Wishlisted", "https://steamdb.info/stats/mostwished/"),
+            ("Upcoming", "https://steamdb.info/upcoming/"),
+            ("Calendar", "https://steamdb.info/calendar/"),
+        ]
+        render_link_button_grid(steamdb_links, "home_steamdb_compact")
+
+
+def render_home_common_tools_grid() -> None:
+    st.markdown("### 常用工具")
+    tools = [
+        ("SteamDB", "https://steamdb.info/", "external"),
+        ("Steam 折扣", "https://store.steampowered.com/specials", "external"),
+        ("Top Rated", f"https://steamdb.info/stats/gameratings/{datetime.now().year}/", "external"),
+        ("Wishlist", "https://steamdb.info/stats/wishlistactivity/", "external"),
+        ("Followers", "https://steamdb.info/stats/trendingfollowers/", "external"),
+        ("Calendar", "https://steamdb.info/calendar/", "external"),
+        ("B站搜索", "https://search.bilibili.com/all?keyword=Steam%20indie%20game", "external"),
+        ("小黑盒搜索", "https://api.xiaoheihe.cn/maxnews/app/search?keyword=Steam", "external"),
+        ("项目画像", "profile", "internal"),
+        ("搜索中心", "search", "internal"),
+    ]
+    columns = st.columns(5)
+    for index, (label, target, kind) in enumerate(tools):
+        with columns[index % 5]:
+            if kind == "external":
+                st.link_button(label, target, use_container_width=True)
+            elif st.button(label, key=f"home_common_tool_{label}", use_container_width=True):
+                st.session_state["pending_home_target"] = target
+                st.rerun()
+
+
+def render_home_primary_entry_cards() -> None:
+    st.markdown("### SteamDB 入口卡")
+    links = [
+        ("Top Rated Releases", f"https://steamdb.info/stats/gameratings/{datetime.now().year}/", "年度高评分新作"),
+        ("Trending Followers", "https://steamdb.info/stats/trendingfollowers/", "关注增长趋势"),
+        ("Wishlist Activity", "https://steamdb.info/stats/wishlistactivity/", "愿望单活动"),
+        ("Most Wishlisted", "https://steamdb.info/stats/mostwished/", "愿望单总量"),
+        ("Upcoming", "https://steamdb.info/upcoming/", "即将推出"),
+        ("Calendar", "https://steamdb.info/calendar/", "发售日历"),
+    ]
+    columns = st.columns(3)
+    for index, (label, url, note) in enumerate(links):
+        with columns[index % 3]:
+            with st.container(border=True):
+                st.markdown(f"**{label}**")
+                st.caption(note)
+                st.link_button("打开入口", url, use_container_width=True)
+
+
+def render_home_feed_section_card(title: str, items: list[HomeFeedItem], fallback_url: str) -> None:
+    with st.container(border=True):
+        st.markdown(f"**{title}**")
+        if not items:
+            st.caption("暂无缓存项目，入口可直接打开。")
+            st.link_button("打开入口", fallback_url, use_container_width=True)
+            return
+        for item in items[:3]:
+            st.caption(f"{item.game_name or '未命名项目'} · {(item.metric or item.release_or_wishlist or '指标待确认')[:70]}")
+        st.link_button("打开入口", fallback_url, use_container_width=True)
+
+
+def render_home_discovery_projects(
+    feed: HomeFeedResult,
+    snapshots: pd.DataFrame,
+    daily_notes: pd.DataFrame,
+    steamdb_notes: pd.DataFrame,
+) -> None:
+    st.markdown("### 首页快照卡片")
+    items = collect_home_discovery_items(feed, snapshots, daily_notes, steamdb_notes)
+    if not items:
+        st.caption("暂无首页快照或今日观察，先使用上方 Steam 图文源。")
+        return
+
+    if feed.from_cache or feed.used_stale_cache:
+        st.caption("当前显示缓存数据。")
+
+    visible_items = items[:5]
+    columns = st.columns(min(5, max(1, len(visible_items))))
+    for index, item in enumerate(visible_items):
+        with columns[index % len(columns)]:
+            render_home_discovery_project_card(item, index)
+
+
+def collect_home_discovery_items(
+    feed: HomeFeedResult,
+    snapshots: pd.DataFrame,
+    daily_notes: pd.DataFrame,
+    steamdb_notes: pd.DataFrame,
+) -> list[dict]:
+    items = []
+    seen = set()
+
+    if not snapshots.empty:
+        active_snapshots = snapshots.loc[
+            ~snapshots["is_archived"].astype(str).str.casefold().isin({"true", "1", "yes", "y"})
+        ].copy()
+        if not active_snapshots.empty:
+            active_snapshots["_priority"] = pd.to_numeric(active_snapshots["priority"], errors="coerce").fillna(0)
+            active_snapshots["_created_at"] = pd.to_datetime(active_snapshots["created_at"], errors="coerce")
+            active_snapshots = active_snapshots.sort_values(
+                by=["_priority", "_created_at"],
+                ascending=[False, False],
+            )
+            for _, row in active_snapshots.head(12).iterrows():
+                card = home_snapshot_row_to_card(row)
+                key = home_card_key(card)
+                if key and key not in seen:
+                    seen.add(key)
+                    items.append(card)
+                if len(items) >= 12:
+                    break
+
+    if not daily_notes.empty:
+        today_prefix = datetime.now().strftime("%Y-%m-%d")
+        today_notes = daily_notes.loc[daily_notes["created_at"].astype(str).str.startswith(today_prefix)].copy()
+        for _, row in today_notes.tail(10).iloc[::-1].iterrows():
+            game_name = str(row.get("game_name", "")).strip()
+            appid = str(row.get("appid", "")).strip()
+            key = appid or game_name.casefold()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            items.append({
+                "card_type": "daily_watch",
+                "record_id": str(row.get("record_id", "")).strip(),
+                "title": game_name or f"AppID {appid}",
+                "subtitle": str(row.get("next_action", "")).strip(),
+                "game_name": game_name or "未命名项目",
+                "appid": appid,
+                "source": str(row.get("source", "")).strip() or "今日观察",
+                "source_url": str(row.get("source_url", "")).strip(),
+                "steamdb_url": steamdb_app_url_from_appid(appid),
+                "steam_url": steam_url_from_appid(appid),
+                "image_path": "",
+                "image_url": "",
+                "note": str(row.get("note", "")).strip(),
+                "next_action": str(row.get("next_action", "")).strip(),
+            })
+            if len(items) >= 12:
+                break
+
+    if not steamdb_notes.empty:
+        for _, row in steamdb_notes.tail(10).iloc[::-1].iterrows():
+            game_name = str(row.get("game_name", "")).strip()
+            appid = str(row.get("appid", "")).strip()
+            key = appid or game_name.casefold()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            metric = " / ".join(
+                part
+                for part in [
+                    str(row.get("rank_text", "")).strip(),
+                    str(row.get("release_date", "")).strip(),
+                    str(row.get("rating", "")).strip(),
+                    str(row.get("followers", "")).strip(),
+                ]
+                if part
+            )
+            items.append({
+                "card_type": "steamdb_watch",
+                "record_id": str(row.get("record_id", "")).strip(),
+                "title": game_name or f"AppID {appid}",
+                "subtitle": metric,
+                "game_name": game_name or f"AppID {appid}",
+                "appid": appid,
+                "source": str(row.get("source_page", "")).strip() or "SteamDB观察",
+                "source_url": str(row.get("source_url", "")).strip(),
+                "steamdb_url": str(row.get("steamdb_url", "")).strip() or steamdb_app_url_from_appid(appid),
+                "steam_url": str(row.get("steam_url", "")).strip() or steam_url_from_appid(appid),
+                "image_path": "",
+                "image_url": "",
+                "note": str(row.get("note", "")).strip(),
+                "next_action": str(row.get("next_action", "")).strip(),
+            })
+            if len(items) >= 12:
+                break
+
+    for section_items in feed.sections.values():
+        for item in section_items:
+            key = item.appid or item.game_name.casefold()
+            if key and key not in seen:
+                seen.add(key)
+                items.append(home_feed_item_to_card(item))
+            if len(items) >= 12:
+                break
+        if len(items) >= 12:
+            break
+    return items
+
+
+def render_home_discovery_project_card(item: dict, index: int) -> None:
+    with st.container(border=True):
+        image_url = resolve_home_card_image(item)
+        if image_url:
+            st.image(image_url, use_container_width=True)
+        else:
+            st.markdown("#### Steam / SteamDB")
+            st.caption(item.get("subtitle") or "入口卡")
+        title = item.get("title") or item.get("game_name") or "未命名项目"
+        st.markdown(f"**{title}**")
+        game_name = item.get("game_name", "")
+        if game_name and game_name != title:
+            st.caption(game_name)
+        st.caption(f"{item.get('source_group') or item.get('source') or '信息流'} · AppID：{item.get('appid') or '未获取'}")
+        if item.get("card_type") == "steam_store":
+            review_total = int(float(item.get("review_total") or 0))
+            if review_total <= 0:
+                st.markdown("**暂无评测**")
+            elif review_total < 10:
+                st.markdown(f"**样本不足** · {review_total:,} 篇")
+            else:
+                st.markdown(f"**好评率：{format_positive_rate(item.get('positive_rate'))} / {review_total:,} 篇**")
+            st.caption(f"评测：{item.get('review_score_desc') or item.get('review_stats_status') or '评价未获取'}")
+            st.caption(
+                "游玩：评测样本中位 "
+                f"{format_hours(item.get('median_playtime_hours'))} / 平均 {format_hours(item.get('avg_playtime_hours'))}"
+            )
+            st.caption(f"简中：{item.get('supports_schinese') or '未确认'} · Demo：{item.get('has_demo') or '未确认'}")
+            st.caption(f"开发：{compact_card_value(item.get('developer'))}")
+            st.caption(f"发行：{compact_card_value(item.get('publisher'))}")
+            st.caption(f"发售：{compact_card_value(item.get('release_date'))}")
+            st.caption(f"类型：{compact_card_value(item.get('genres'), max_len=34)}")
+            st.caption(f"价格：{compact_card_value(item.get('price'))}")
+            with st.expander("详情", expanded=False):
+                st.write(f"标签：{compact_card_value(item.get('tags'), max_len=220)}")
+                st.write(f"评价摘要：{compact_card_value(item.get('review_summary') or item.get('review_score_desc'), max_len=220)}")
+                st.write(
+                    "Steam 评测样本："
+                    f"正评 {format_review_total(item.get('review_positive'))} / "
+                    f"差评 {format_review_total(item.get('review_negative'))} / "
+                    f"样本 {format_review_total(item.get('sample_review_count'))}"
+                )
+                st.write(f"评价缓存状态：{item.get('review_cache_status') or item.get('review_stats_status') or '评价未获取'}")
+                st.write(f"语言：{compact_card_value(item.get('supported_languages_summary'), max_len=220)}")
+                st.write(f"Steam 上架日期 / 页面创建日期：{item.get('steam_page_date') or '未获取'}")
+                st.caption(item.get("steam_page_date_status") or "后续通过 SteamDB History 或人工摘录补充")
+                st.write(f"search_source_filter：{item.get('source_filter') or item.get('search_source_filter') or '未获取'}")
+                st.write(f"source_group：{item.get('source_group') or '未获取'}")
+                st.write(f"appdetails_status：{item.get('appdetails_status') or item.get('detail_fetch_status') or '未获取'}")
+                st.write(f"cache_status：{item.get('cache_status') or '未获取'}")
+                st.write(f"raw_release_date：{item.get('raw_release_date') or '未获取'}")
+        else:
+            detail_parts = [
+                item.get("price", ""),
+                item.get("release_date", ""),
+                item.get("review_summary", ""),
+            ]
+            detail_text = " / ".join(str(part).strip() for part in detail_parts if str(part or "").strip())
+            st.write((detail_text or item.get("note") or item.get("next_action") or item.get("subtitle") or "下一步：打开来源页人工筛选")[:120])
+        if item.get("appid") and item.get("card_type") != "steam_store":
+            st.caption(f"AppID：{item.get('appid')}")
+
+        source_link = item.get("source_url") or item.get("steamdb_url") or item.get("steam_url")
+        link_col1, link_col2, link_col3 = st.columns(3)
+        with link_col1:
+            if source_link:
+                st.link_button("打开来源", source_link, use_container_width=True)
+        with link_col2:
+            if item.get("steam_url"):
+                st.link_button("打开 Steam", item["steam_url"], use_container_width=True)
+        with link_col3:
+            if item.get("steamdb_url"):
+                st.link_button("打开 SteamDB", item["steamdb_url"], use_container_width=True)
+
+        action_cols = st.columns(4)
+        with action_cols[0]:
+            if st.button("加入观察", key=f"home_discovery_watch_{item.get('card_type')}_{item.get('record_id')}_{index}", use_container_width=True):
+                add_home_card_to_daily_watch(item)
+        with action_cols[1]:
+            if st.button("项目画像", key=f"home_discovery_profile_{item.get('card_type')}_{item.get('record_id')}_{index}", use_container_width=True):
+                send_home_card_to_profile(item)
+        with action_cols[2]:
+            if st.button("搜索中心", key=f"home_discovery_search_{item.get('card_type')}_{item.get('record_id')}_{index}", use_container_width=True):
+                send_home_card_to_search_center(item)
+        with action_cols[3]:
+            if item.get("card_type") == "snapshot":
+                if st.button("归档", key=f"home_discovery_archive_{item.get('record_id')}_{index}", use_container_width=True):
+                    update_home_snapshot_fields(HOME_SNAPSHOT_CSV_PATH, item.get("record_id", ""), {"is_archived": "True"})
+                    st.rerun()
+            else:
+                if st.button("加入候选", key=f"home_discovery_candidate_{item.get('card_type')}_{item.get('record_id')}_{index}", use_container_width=True):
+                    add_home_card_to_candidate_pool(item)
+
+
+def compact_card_value(value, max_len: int = 48) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "未获取"
+    if text in {"[]", "None", "nan"}:
+        return "未获取"
+    return text if len(text) <= max_len else text[: max_len - 1] + "…"
+
+
+def format_positive_rate(value) -> str:
+    try:
+        rate = float(value)
+    except (TypeError, ValueError):
+        return "暂无"
+    if rate <= 1:
+        rate *= 100
+    return f"{rate:.0f}%"
+
+
+def format_review_total(value) -> str:
+    try:
+        total = int(float(value or 0))
+    except (TypeError, ValueError):
+        total = 0
+    return f"{total:,}" if total > 0 else "暂无"
+
+
+def format_hours(value) -> str:
+    try:
+        hours = float(value)
+    except (TypeError, ValueError):
+        return "暂无"
+    return f"{hours:.1f}h"
+
+
+def parse_price_cny(value) -> float | None:
+    text = str(value or "").replace(",", "").strip()
+    if not text:
+        return None
+    if "免费" in text or "Free" in text:
+        return 0.0
+    match = re.search(r"¥\s*([0-9]+(?:\.[0-9]+)?)", text)
+    if match:
+        return float(match.group(1))
+    match = re.search(r"([0-9]+(?:\.[0-9]+)?)", text)
+    return float(match.group(1)) if match else None
+
+
+def parse_discount_percent(card: dict) -> int | None:
+    for key in ["discount_percent", "discount"]:
+        raw = str(card.get(key, "") or "").strip().replace("%", "")
+        if raw.lstrip("-").isdigit():
+            return abs(int(raw))
+    text = " ".join(str(card.get(key, "") or "") for key in ["price", "note", "review_summary"])
+    match = re.search(r"-\s*(\d{1,2})%", text)
+    return int(match.group(1)) if match else None
+
+
+def resolve_home_card_image(item: dict) -> str:
+    image_path = str(item.get("image_path", "") or "").strip()
+    if image_path and Path(image_path).exists():
+        return image_path
+    image_url = str(item.get("image_url", "") or "").strip()
+    appid = str(item.get("appid", "") or "").strip()
+    if image_url and "capsule_sm_120" not in image_url:
+        return image_url
+    if not appid:
+        return image_url
+    try:
+        image_data = get_cached_steam_image(appid, STEAM_IMAGE_CACHE_PATH)
+    except Exception:
+        return image_url
+    return str(image_data.get("header_image") or image_data.get("capsule_image") or image_url or "").strip()
+
+
+def get_home_default_entry_cards() -> list[dict]:
+    current_year = datetime.now().year
+    return [
+        build_entry_card(f"Top Rated Releases {current_year}", f"https://steamdb.info/stats/gameratings/{current_year}/", "从年度高评分新作里筛选可发行项目"),
+        build_entry_card("Trending Followers", "https://steamdb.info/stats/trendingfollowers/", "查看近期关注增长异常的新项目"),
+        build_entry_card("Wishlist Activity", "https://steamdb.info/stats/wishlistactivity/", "查看愿望单活动和即将发售机会"),
+        build_entry_card("Upcoming / Calendar", "https://steamdb.info/upcoming/", "查看即将推出项目和发售日历"),
+    ]
+
+
+def build_entry_card(title: str, url: str, note: str) -> dict:
+    return {
+        "card_type": "entry",
+        "record_id": re.sub(r"\W+", "_", title.casefold()),
+        "title": title,
+        "subtitle": "入口卡",
+        "game_name": title,
+        "appid": "",
+        "source": "SteamDB入口",
+        "source_url": url,
+        "steam_url": "",
+        "steamdb_url": url,
+        "image_path": "",
+        "image_url": "",
+        "note": note,
+        "next_action": "打开入口人工筛选",
+    }
+
+
+def home_card_key(card: dict) -> str:
+    appid = str(card.get("appid", "") or "").strip()
+    name = str(card.get("game_name", "") or card.get("title", "") or "").strip().casefold()
+    return appid or name
+
+
+def home_snapshot_row_to_card(row: pd.Series) -> dict:
+    return {
+        "card_type": "snapshot",
+        "record_id": str(row.get("record_id", "")).strip(),
+        "title": str(row.get("title", "")).strip() or str(row.get("game_name", "")).strip() or "未命名快照",
+        "subtitle": str(row.get("subtitle", "")).strip(),
+        "game_name": str(row.get("game_name", "")).strip(),
+        "appid": str(row.get("appid", "")).strip(),
+        "source": str(row.get("source", "")).strip() or "首页快照",
+        "source_url": str(row.get("source_url", "")).strip(),
+        "steam_url": str(row.get("steam_url", "")).strip(),
+        "steamdb_url": str(row.get("steamdb_url", "")).strip(),
+        "image_path": str(row.get("image_path", "")).strip(),
+        "image_url": str(row.get("image_url", "")).strip(),
+        "note": str(row.get("note", "")).strip(),
+        "next_action": str(row.get("next_action", "")).strip(),
+    }
+
+
+def home_feed_item_to_card(item: HomeFeedItem) -> dict:
+    return {
+        "card_type": "feed",
+        "record_id": item.appid or item.game_name,
+        "title": item.game_name or f"AppID {item.appid}",
+        "subtitle": item.metric or item.release_or_wishlist,
+        "game_name": item.game_name,
+        "appid": item.appid,
+        "source": item.source,
+        "source_url": item.source_url,
+        "steam_url": item.steam_url,
+        "steamdb_url": item.steamdb_url,
+        "image_path": "",
+        "image_url": "",
+        "note": item.note or item.metric,
+        "next_action": "生成项目画像",
+    }
+
+
+def steam_store_item_to_card(item: SteamStoreFeedItem) -> dict:
+    detail_parts = [
+        item.price,
+        item.release_date,
+        item.review_summary,
+    ]
+    note = " / ".join(part for part in detail_parts if str(part or "").strip())
+    return {
+        "card_type": "steam_store",
+        "record_id": item.appid,
+        "title": item.game_name or f"AppID {item.appid}",
+        "subtitle": item.source_group,
+        "game_name": item.game_name,
+        "appid": item.appid,
+        "source": item.source_group,
+        "source_group": item.source_group,
+        "source_filter": item.source_filter,
+        "search_source_filter": item.source_filter,
+        "source_url": item.steam_url,
+        "steam_url": item.steam_url,
+        "steamdb_url": steamdb_app_url_from_appid(item.appid),
+        "image_path": "",
+        "image_url": item.image_url,
+        "price": item.price,
+        "release_date": item.release_date,
+        "raw_release_date": item.release_date,
+        "review_summary": item.review_summary,
+        "has_demo": item.has_demo,
+        "supports_schinese": item.has_simplified_chinese or "未确认",
+        "developer": "未获取",
+        "publisher": "未获取",
+        "genres": "未获取",
+        "tags": "未获取",
+        "steam_page_date": "未获取",
+        "steam_page_date_status": "后续通过 SteamDB History 或人工摘录补充",
+        "supported_languages_summary": "未获取",
+        "detail_fetch_status": "未获取",
+        "note": note,
+        "next_action": "生成项目画像",
+    }
+
+
+def add_home_card_to_daily_watch(card: dict) -> None:
+    note = DailyWatchNote(
+        source=str(card.get("source", "") or "首页快照"),
+        source_url=str(card.get("source_url", "") or card.get("steamdb_url", "") or card.get("steam_url", "")),
+        game_name=str(card.get("game_name", "") or card.get("title", "")),
+        appid=str(card.get("appid", "")),
+        note=str(card.get("note", "") or card.get("subtitle", "")),
+        next_action=str(card.get("next_action", "") or "生成项目画像"),
+        imported_to_project="False",
+    )
+    if not note.game_name and not note.appid:
+        st.warning("缺少游戏名和 AppID，无法加入今日观察。")
+        return
+    save_daily_watch_note_to_csv(note, DAILY_WATCH_CSV_PATH)
+    st.success(f"已加入今日观察：{note.game_name or note.appid}")
+
+
+def add_home_card_to_candidate_pool(card: dict) -> None:
+    item = HomeFeedItem(
+        game_name=str(card.get("game_name", "") or card.get("title", "")),
+        appid=str(card.get("appid", "")),
+        source=str(card.get("source", "") or "首页 Steam 图文源"),
+        source_url=str(card.get("source_url", "")),
+        steamdb_url=str(card.get("steamdb_url", "")),
+        steam_url=str(card.get("steam_url", "")),
+        metric=str(card.get("note", "") or card.get("subtitle", "")),
+        note=str(card.get("note", "")),
+    )
+    add_feed_item_to_candidate_pool(item)
+
+
+def send_home_card_to_profile(card: dict) -> None:
+    normalized = normalize_steam_game_data(
+        appid=str(card.get("appid", "")),
+        search_item=card,
+        appdetails={},
+        review_stats=card,
+    )
+    row = pd.Series(
+        {
+            "game_name": str(normalized.get("game_name") or card.get("game_name", "") or card.get("title", "")),
+            "appid": str(normalized.get("appid") or card.get("appid", "")),
+            "source_url": str(card.get("source_url", "") or card.get("steamdb_url", "")),
+            "steam_url": str(normalized.get("steam_url") or card.get("steam_url", "")),
+            "note": str(card.get("note", "") or card.get("subtitle", "")),
+            "developer": str(normalized.get("developer", "")),
+            "publisher": str(normalized.get("publisher", "")),
+            "genres": str(normalized.get("genres", "")),
+            "release_date": str(normalized.get("release_date", "")),
+            "price": str(normalized.get("price", "")),
+            "supports_schinese": str(normalized.get("supports_schinese", "")),
+            "has_demo": str(normalized.get("has_demo", "")),
+            "review_total": str(normalized.get("review_total", "")),
+            "review_positive": str(normalized.get("review_positive", "")),
+            "review_negative": str(normalized.get("review_negative", "")),
+            "positive_rate": str(normalized.get("positive_rate", "")),
+            "review_score_desc": str(normalized.get("review_score_desc", "")),
+            "median_playtime_hours": str(normalized.get("median_playtime_hours", "")),
+            "avg_playtime_hours": str(normalized.get("avg_playtime_hours", "")),
+            "review_stats_status": str(normalized.get("review_stats_status", "")),
+            "source_group": str(card.get("source_group", "")),
+        }
+    )
+    send_daily_watch_to_profile(row)
+
+
+def send_home_card_to_search_center(card: dict) -> None:
+    normalized = normalize_steam_game_data(
+        appid=str(card.get("appid", "")),
+        search_item=card,
+        appdetails={},
+        review_stats=card,
+    )
+    row = pd.Series(
+        {
+            "game_name": str(normalized.get("game_name") or card.get("game_name", "") or card.get("title", "")),
+            "appid": str(normalized.get("appid") or card.get("appid", "")),
+            "source": str(card.get("source", "")),
+            "source_url": str(card.get("source_url", "") or normalized.get("steam_url", "") or card.get("steamdb_url", "")),
+            "note": str(card.get("note", "") or card.get("subtitle", "")),
+            "developer": str(normalized.get("developer", "")),
+            "publisher": str(normalized.get("publisher", "")),
+            "genres": str(normalized.get("genres", "")),
+            "tags": str(card.get("tags", "")),
+            "release_date": str(normalized.get("release_date", "")),
+            "source_group": str(card.get("source_group", "")),
+        }
+    )
+    send_daily_watch_to_search_center(row)
+
+
+def render_home_snapshot_form() -> None:
+    st.markdown("### 首页快照")
+    with st.expander("添加首页快照", expanded=False):
+        with st.form("home_snapshot_form"):
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                source = st.selectbox("来源", get_home_snapshot_source_options(), key="snapshot_source")
+                game_name = st.text_input("游戏名", key="snapshot_game_name")
+                appid_input = st.text_input("AppID", key="snapshot_appid")
+                source_url = st.text_input("来源链接", key="snapshot_source_url")
+            with col2:
+                steam_url = st.text_input("Steam 链接", key="snapshot_steam_url")
+                steamdb_url = st.text_input("SteamDB 链接", key="snapshot_steamdb_url")
+                image_url = st.text_input("图片 URL（可选）", key="snapshot_image_url")
+                uploaded_image = st.file_uploader(
+                    "上传图片（可选）",
+                    type=["png", "jpg", "jpeg", "webp"],
+                    key="snapshot_uploaded_image",
+                )
+            with col3:
+                title = st.text_input("标题", key="snapshot_title")
+                subtitle = st.text_input("副标题", key="snapshot_subtitle")
+                next_action = st.selectbox(
+                    "下一步动作",
+                    ["生成项目画像", "搜索中心", "加入候选", "试玩Demo", "联系开发者", "暂缓", "放弃"],
+                    key="snapshot_next_action",
+                )
+                priority = st.number_input("优先级", min_value=-100, max_value=100, value=0, step=1, key="snapshot_priority")
+                pinned = st.checkbox("置顶（priority +10）", value=False, key="snapshot_pinned")
+            note = st.text_area("观察备注", height=88, key="snapshot_note")
+            save_only, save_profile, save_search = st.columns(3)
+            save_snapshot = save_only.form_submit_button("保存快照")
+            save_and_profile = save_profile.form_submit_button("保存并发送到项目画像")
+            save_and_search = save_search.form_submit_button("保存并发送到搜索中心")
+
+    if save_snapshot or save_and_profile or save_and_search:
+        resolved_appid = parse_steamdb_appid(appid_input) or parse_steamdb_appid(source_url) or parse_steamdb_appid(steam_url) or parse_steamdb_appid(steamdb_url)
+        resolved_steam_url = steam_url.strip() or steam_url_from_appid(resolved_appid)
+        resolved_steamdb_url = steamdb_url.strip() or steamdb_app_url_from_appid(resolved_appid)
+        local_image_path = save_home_snapshot_upload(uploaded_image, resolved_appid, game_name)
+        final_priority = int(priority) + (10 if pinned else 0)
+        snapshot = HomeSnapshot(
+            source=source,
+            source_url=source_url.strip() or resolved_steamdb_url or resolved_steam_url,
+            game_name=game_name.strip(),
+            appid=resolved_appid,
+            steam_url=resolved_steam_url,
+            steamdb_url=resolved_steamdb_url,
+            image_path=local_image_path,
+            image_url=image_url.strip(),
+            title=title.strip() or game_name.strip() or (f"AppID {resolved_appid}" if resolved_appid else ""),
+            subtitle=subtitle.strip(),
+            note=note.strip(),
+            next_action=next_action,
+            priority=str(final_priority),
+            is_archived="False",
+        )
+        if not snapshot.title and not snapshot.source_url and not snapshot.image_path and not snapshot.image_url:
+            st.error("请至少填写标题、游戏名、来源链接或上传图片。")
+            return
+        save_home_snapshot_to_csv(snapshot, HOME_SNAPSHOT_CSV_PATH)
+        card = home_snapshot_row_to_card(pd.Series({
+            "record_id": snapshot.record_id,
+            "title": snapshot.title,
+            "subtitle": snapshot.subtitle,
+            "game_name": snapshot.game_name,
+            "appid": snapshot.appid,
+            "source": snapshot.source,
+            "source_url": snapshot.source_url,
+            "steam_url": snapshot.steam_url,
+            "steamdb_url": snapshot.steamdb_url,
+            "image_path": snapshot.image_path,
+            "image_url": snapshot.image_url,
+            "note": snapshot.note,
+            "next_action": snapshot.next_action,
+        }))
+        if save_and_profile:
+            send_home_card_to_profile(card)
+        elif save_and_search:
+            send_home_card_to_search_center(card)
+        else:
+            st.success("已保存首页快照。")
+
+
+def get_home_snapshot_source_options() -> list[str]:
+    return [
+        "Steam首页",
+        "SteamDB榜单",
+        "Top Rated",
+        "Trending Followers",
+        "Wishlist Activity",
+        "Most Wishlisted",
+        "Upcoming",
+        "Calendar",
+        "B站",
+        "YouTube",
+        "小黑盒",
+        "其他",
+    ]
+
+
+def save_home_snapshot_upload(uploaded_image, appid: str, game_name: str) -> str:
+    if uploaded_image is None:
+        return ""
+    HOME_SNAPSHOT_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+    original_name = str(getattr(uploaded_image, "name", "") or "snapshot.png")
+    suffix = Path(original_name).suffix.lower()
+    if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+        suffix = ".png"
+    stem_parts = [
+        datetime.now().strftime("%Y%m%d_%H%M%S"),
+        str(appid or "").strip(),
+        re.sub(r"[^A-Za-z0-9_-]+", "_", str(game_name or "snapshot").strip())[:40],
+    ]
+    filename = "_".join(part for part in stem_parts if part) + suffix
+    target_path = HOME_SNAPSHOT_IMAGE_DIR / filename
+    target_path.write_bytes(uploaded_image.getbuffer())
+    return str(target_path)
+
+
+def render_home_steam_news_summary(feed: HomeFeedResult) -> None:
+    st.markdown("### Steam 新闻与活动")
+    link_cols = st.columns(4)
+    for index, (label, url) in enumerate(get_steam_news_links()):
+        with link_cols[index]:
+            st.link_button(label, url, use_container_width=True)
+
+    if not feed.news:
+        return
+    news_cols = st.columns(3)
+    for index, news in enumerate(feed.news[:3]):
+        with news_cols[index % 3]:
+            with st.container(border=True):
+                st.markdown(f"**{news.title[:80]}**")
+                if news.url:
+                    st.link_button("打开新闻", news.url, use_container_width=True)
+
+
+def add_feed_item_to_daily_watch(item: HomeFeedItem) -> None:
+    note = DailyWatchNote(
+        source=item.source or "首页信息流",
+        source_url=item.steamdb_url or item.source_url,
+        game_name=item.game_name,
+        appid=item.appid,
+        note=item.metric or item.note,
+        next_action="生成项目画像",
+        imported_to_project="False",
+    )
+    if not note.game_name and not note.appid:
+        st.warning("缺少游戏名和 AppID，无法加入今日观察。")
+        return
+    save_daily_watch_note_to_csv(note, DAILY_WATCH_CSV_PATH)
+    st.success(f"已加入今日观察：{note.game_name or note.appid}")
+
+
+def send_feed_item_to_profile(item: HomeFeedItem) -> None:
+    row = pd.Series(
+        {
+            "game_name": item.game_name,
+            "appid": item.appid,
+            "source_url": item.steam_url or item.source_url or item.steamdb_url,
+            "steam_url": item.steam_url,
+            "note": item.metric or item.note,
+        }
+    )
+    send_daily_watch_to_profile(row)
+
+
+def send_feed_item_to_search_center(item: HomeFeedItem) -> None:
+    row = pd.Series(
+        {
+            "game_name": item.game_name,
+            "appid": item.appid,
+            "source": item.source,
+            "source_url": item.steamdb_url or item.source_url,
+            "note": item.metric or item.note,
+        }
+    )
+    send_daily_watch_to_search_center(row)
+
+
+def add_feed_item_to_candidate_pool(item: HomeFeedItem) -> None:
+    if feed_item_candidate_exists(item):
+        st.info("该项目已在候选池中，不重复写入。")
+        return
+    candidate = CompetitorCandidate(
+        target_game_name="首页信息流",
+        target_appid="",
+        candidate_name=item.game_name,
+        candidate_steam_url=item.steam_url,
+        candidate_appid=item.appid,
+        source_keyword=item.source or "首页信息流",
+        source_type="首页信息流",
+        match_reason="首页榜单或趋势信息流出现，适合作为候选观察。",
+        user_decision="待确认",
+        notes=item.metric or item.note,
+    )
+    save_candidate_to_csv(candidate, CANDIDATE_CSV_PATH)
+    st.success(f"已加入候选池：{item.game_name or item.appid}")
+
+
+def feed_item_candidate_exists(item: HomeFeedItem) -> bool:
+    candidates = load_candidates(CANDIDATE_CSV_PATH)
+    if candidates.empty:
+        return False
+    appid = str(item.appid or "").strip()
+    name = str(item.game_name or "").strip().casefold()
+    if appid and "candidate_appid" in candidates.columns:
+        return bool(candidates["candidate_appid"].astype(str).str.strip().eq(appid).any())
+    if name and "candidate_name" in candidates.columns:
+        return bool(candidates["candidate_name"].astype(str).str.strip().str.casefold().eq(name).any())
+    return False
+
+
+def render_home_quick_actions() -> None:
+    st.markdown("### 快速操作")
+    action_rows = [
+        ("新建项目画像", "profile"),
+        ("打开 SteamDB 发现", "steamdb"),
+        ("打开搜索中心", "search"),
+        ("打开历史项目记录", "history"),
+        ("打开今日观察记录", "daily_watch"),
+    ]
+    for index, (label, target) in enumerate(action_rows):
+        if st.button(label, use_container_width=True, key=f"home_quick_action_{index}"):
+            st.session_state["pending_home_target"] = target
+            st.rerun()
+
+    if st.button("导出 Excel", use_container_width=True, key="home_export_excel"):
+        excel_path = export_projects_to_excel(
+            CSV_PATH,
+            EXCEL_REPORT_PATH,
+            COMPETITOR_CSV_PATH,
+            CANDIDATE_CSV_PATH,
+            STEAMDB_WATCH_NOTE_CSV_PATH,
+            STEAMDB_TEMPLATE_CSV_PATH,
+            DAILY_WATCH_CSV_PATH,
+            HOME_SNAPSHOT_CSV_PATH,
+            STEAM_HOME_FEED_CACHE_PATH,
+            STEAM_APPDETAILS_CACHE_PATH,
+            STEAM_REVIEW_STATS_CACHE_PATH,
+        )
+        st.success(f"Excel 已导出：{excel_path}")
+
+    with st.expander("SteamDB / Steam 常用入口", expanded=False):
+        render_home_steamdb_links()
+        render_home_steam_news_links()
+
+
+def render_home_steamdb_links() -> None:
+    st.markdown("### SteamDB 发现入口")
+    templates = load_templates(STEAMDB_TEMPLATE_CSV_PATH)
+    favorite_templates = pd.DataFrame()
+    if not templates.empty and "is_favorite" in templates.columns:
+        favorite_templates = templates.loc[
+            templates["is_favorite"].astype(str).str.casefold().isin({"true", "1", "yes", "y"})
+        ].copy()
+
+    if not favorite_templates.empty:
+        st.markdown("**收藏模板**")
+        favorite_links = [
+            (
+                str(row.get("template_name", "")).strip() or "SteamDB 模板",
+                str(row.get("steamdb_url", "")).strip(),
+            )
+            for _, row in favorite_templates.head(6).iterrows()
+            if str(row.get("steamdb_url", "")).strip()
+        ]
+        render_link_button_grid(favorite_links, "home_steamdb_favorites")
+
+    groups = get_steamdb_common_link_groups()
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("**新作发现**")
+        render_link_button_grid(
+            [
+                ("Top Rated Releases 2026", "https://steamdb.info/stats/gameratings/2026/"),
+                ("Top Rated Releases 2027", "https://steamdb.info/stats/gameratings/2027/"),
+                ("Upcoming Releases", "https://steamdb.info/upcoming/"),
+                ("Release Calendar", "https://steamdb.info/calendar/"),
+            ],
+            "home_steamdb_discovery",
+        )
+    with col2:
+        st.markdown("**热度观察**")
+        render_link_button_grid(groups["热度观察"], "home_steamdb_heat")
+
+
+def render_home_steam_news_links() -> None:
+    st.markdown("### Steam / 新闻 / 活动入口")
+    render_link_button_grid(get_steam_news_links(), "home_steam_news")
+
+
+def render_home_recent_projects(active_projects: pd.DataFrame) -> None:
+    st.markdown("### 最近项目与待办")
+    recent_projects = active_projects.tail(10).copy()
+    display_columns = [
+        "created_at",
+        "game_name",
+        "appid",
+        "release_status",
+        "has_demo",
+        "next_action",
+        "demo_conclusion",
+        "is_deleted",
+    ]
+    if recent_projects.empty:
+        st.info("暂无最近项目。")
+        return
+
+    compact = build_home_project_display(recent_projects.tail(5), display_columns)
+    st.dataframe(compact, use_container_width=True, hide_index=True)
+
+    with st.expander("查看完整最近项目", expanded=False):
+        st.dataframe(build_home_project_display(recent_projects, display_columns), use_container_width=True, hide_index=True)
+
+
+def render_home_pending_projects(pending_projects: pd.DataFrame) -> None:
+    st.markdown("### 待处理项目")
+    display_columns = [
+        "created_at",
+        "game_name",
+        "appid",
+        "release_status",
+        "has_demo",
+        "next_action",
+        "demo_conclusion",
+        "is_deleted",
+    ]
+    if pending_projects.empty:
+        st.info("暂无待处理项目。")
+        return
+
+    st.dataframe(
+        build_home_project_display(pending_projects.tail(5), display_columns),
+        use_container_width=True,
+        hide_index=True,
+    )
+    with st.expander("查看完整待处理项目", expanded=False):
+        st.dataframe(
+            build_home_project_display(pending_projects.tail(10), display_columns),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
+def build_home_project_display(projects: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    existing_columns = [column for column in columns if column in projects.columns]
+    display = projects.loc[:, existing_columns].copy()
+    return display.rename(
+        columns={
+            "created_at": "创建时间",
+            "game_name": "游戏名",
+            "appid": "AppID",
+            "release_status": "发售状态",
+            "has_demo": "是否有 Demo",
+            "next_action": "下一步动作",
+            "demo_conclusion": "Demo 结论",
+            "is_deleted": "是否已删除",
+        }
+    )
+
+
+def filter_pending_projects(projects: pd.DataFrame) -> pd.DataFrame:
+    if projects.empty or "next_action" not in projects.columns:
+        return pd.DataFrame(columns=projects.columns)
+    keywords = ["先试玩 Demo", "先查竞品", "联系开发者", "暂缓观察", "生成项目画像", "待补充"]
+    pattern = "|".join(re.escape(keyword) for keyword in keywords)
+    return projects.loc[projects["next_action"].astype(str).str.contains(pattern, case=False, na=False)].copy()
+
+
+def render_home_daily_watch_form() -> None:
+    st.markdown("### 今日观察记录")
+    with st.expander("手动添加今日观察", expanded=False):
+        with st.form("daily_watch_form"):
+            col1, col2 = st.columns(2)
+            with col1:
+                source = st.selectbox(
+                    "来源",
+                    [
+                        "Steam首页",
+                        "SteamDB首页",
+                        "Top Rated",
+                        "Charts",
+                        "Trending Followers",
+                        "Wishlist Activity",
+                        "Most Wishlisted",
+                        "Upcoming",
+                        "Calendar",
+                        "B站",
+                        "YouTube",
+                        "小黑盒",
+                        "其他",
+                    ],
+                )
+                game_name = st.text_input("游戏名", key="daily_watch_game_name")
+                appid = st.text_input("AppID", key="daily_watch_appid")
+            with col2:
+                source_url = st.text_input("来源链接", key="daily_watch_source_url")
+                next_action = st.selectbox(
+                    "下一步动作",
+                    ["生成项目画像", "加入候选", "试玩Demo", "查竞品", "联系开发者", "暂缓", "放弃"],
+                )
+                note = st.text_area("观察备注", height=88, key="daily_watch_note")
+
+            save_only, save_profile, save_search = st.columns(3)
+            save_note = save_only.form_submit_button("保存今日观察")
+            save_and_profile = save_profile.form_submit_button("保存并发送到项目画像")
+            save_and_search = save_search.form_submit_button("保存并发送到搜索中心")
+
+    if save_note or save_and_profile or save_and_search:
+        resolved_appid = parse_steamdb_appid(appid) or parse_steamdb_appid(source_url)
+        note_record = DailyWatchNote(
+            source=source,
+            source_url=source_url.strip(),
+            game_name=game_name.strip(),
+            appid=resolved_appid,
+            note=note.strip(),
+            next_action=next_action,
+            imported_to_project="False",
+        )
+        if not note_record.game_name and not note_record.appid:
+            st.error("请至少填写游戏名或 AppID。")
+            return
+        save_daily_watch_note_to_csv(note_record, DAILY_WATCH_CSV_PATH)
+        row = pd.Series(
+            {
+                "source": note_record.source,
+                "source_url": note_record.source_url,
+                "game_name": note_record.game_name,
+                "appid": note_record.appid,
+                "note": note_record.note,
+                "next_action": note_record.next_action,
+            }
+        )
+        if save_and_profile:
+            send_daily_watch_to_profile(row)
+        elif save_and_search:
+            send_daily_watch_to_search_center(row)
+        else:
+            st.success("已保存今日观察。")
+
+
+def render_home_snapshot_manager(snapshots: pd.DataFrame) -> None:
+    with st.expander("管理首页快照", expanded=False):
+        current_snapshots = load_home_snapshots(HOME_SNAPSHOT_CSV_PATH)
+        if current_snapshots.empty:
+            st.info("暂无首页快照。")
+            return
+
+        show_archived = st.checkbox("显示已归档快照", value=False, key="snapshot_manager_show_archived")
+        sources = sorted(
+            source
+            for source in current_snapshots["source"].astype(str).str.strip().unique().tolist()
+            if source
+        )
+        source_filter = st.selectbox("按来源筛选", ["全部"] + sources, key="snapshot_manager_source")
+        keyword = st.text_input("按游戏名搜索", key="snapshot_manager_keyword")
+
+        filtered = current_snapshots.copy()
+        if not show_archived:
+            filtered = filtered.loc[
+                ~filtered["is_archived"].astype(str).str.casefold().isin({"true", "1", "yes", "y"})
+            ].copy()
+        if source_filter != "全部":
+            filtered = filtered.loc[filtered["source"].astype(str).str.strip() == source_filter].copy()
+        if keyword.strip():
+            pattern = re.escape(keyword.strip())
+            filtered = filtered.loc[
+                filtered["game_name"].astype(str).str.contains(pattern, case=False, na=False)
+                | filtered["title"].astype(str).str.contains(pattern, case=False, na=False)
+            ].copy()
+
+        if filtered.empty:
+            st.info("没有符合筛选条件的快照。")
+            return
+
+        display = filtered.tail(50).iloc[::-1].rename(
+            columns={
+                "created_at": "创建时间",
+                "source": "来源",
+                "game_name": "游戏名",
+                "appid": "AppID",
+                "title": "标题",
+                "subtitle": "副标题",
+                "next_action": "下一步动作",
+                "priority": "优先级",
+                "is_archived": "已归档",
+            }
+        )
+        st.dataframe(
+            display.loc[:, ["创建时间", "来源", "游戏名", "AppID", "标题", "副标题", "下一步动作", "优先级", "已归档"]],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.markdown("**快照操作**")
+        for index, row in filtered.tail(20).iloc[::-1].iterrows():
+            record_id = str(row.get("record_id", "")).strip()
+            label = str(row.get("title", "")).strip() or str(row.get("game_name", "")).strip() or record_id
+            archived = str(row.get("is_archived", "")).casefold() in {"true", "1", "yes", "y"}
+            current_priority = pd.to_numeric(row.get("priority", "0"), errors="coerce")
+            if pd.isna(current_priority):
+                current_priority = 0
+            cols = st.columns([3, 1, 1, 1])
+            with cols[0]:
+                st.caption(f"{label} · {row.get('source', '')} · priority {row.get('priority', '0')}")
+            with cols[1]:
+                new_priority = st.number_input(
+                    "priority",
+                    min_value=-100,
+                    max_value=100,
+                    value=int(current_priority),
+                    step=1,
+                    key=f"snapshot_priority_edit_{record_id}_{index}",
+                    label_visibility="collapsed",
+                )
+            with cols[2]:
+                if st.button("更新", key=f"snapshot_priority_update_{record_id}_{index}", use_container_width=True):
+                    update_home_snapshot_fields(HOME_SNAPSHOT_CSV_PATH, record_id, {"priority": str(new_priority)})
+                    st.rerun()
+            with cols[3]:
+                action_label = "恢复" if archived else "归档"
+                if st.button(action_label, key=f"snapshot_archive_toggle_{record_id}_{index}", use_container_width=True):
+                    update_home_snapshot_fields(
+                        HOME_SNAPSHOT_CSV_PATH,
+                        record_id,
+                        {"is_archived": "False" if archived else "True"},
+                    )
+                    st.rerun()
+
+
+def render_home_daily_watch_history(daily_notes: pd.DataFrame) -> None:
+    with st.expander("查看今日观察历史", expanded=False):
+        if daily_notes.empty:
+            st.info("暂无今日观察记录。")
+            return
+        display = daily_notes.tail(30).rename(
+            columns={
+                "created_at": "创建时间",
+                "source": "来源",
+                "source_url": "来源链接",
+                "game_name": "游戏名",
+                "appid": "AppID",
+                "note": "观察备注",
+                "next_action": "下一步动作",
+                "imported_to_project": "已导入项目",
+            }
+        )
+        st.dataframe(display, use_container_width=True, hide_index=True)
+
+
+def render_home_debug_expander(feed: HomeFeedResult, steam_feed: SteamStoreFeedResult) -> None:
+    with st.expander("数据获取状态 / 调试信息", expanded=False):
+        snapshots = load_home_snapshots(HOME_SNAPSHOT_CSV_PATH)
+        steam_group_counts = {key: len(value) for key, value in steam_feed.groups.items()}
+        appdetails_cache = load_cached_appdetails_summaries(STEAM_APPDETAILS_CACHE_PATH)
+        appdetails_success_count = sum(1 for detail in appdetails_cache.values() if detail.get("success"))
+        appdetails_failure_count = sum(1 for detail in appdetails_cache.values() if not detail.get("success"))
+        appdetails_cache_hit_count = sum(1 for detail in appdetails_cache.values() if detail.get("cache_status") == "cache_hit")
+        appdetails_missing_fields_count = count_missing_field_cache_entries(STEAM_APPDETAILS_CACHE_PATH)
+        visible_appdetails_stats = st.session_state.get("home_appdetails_visible_stats", {})
+        visible_review_stats = st.session_state.get("home_review_stats_visible_stats", {})
+        filter_debug = st.session_state.get("home_steam_filter_debug", {})
+        st.caption(f"自动信息流缓存：{HOME_FEED_CACHE_PATH}")
+        st.caption(f"Steam 图文源缓存：{STEAM_HOME_FEED_CACHE_PATH}")
+        st.caption(f"Steam appdetails 详情缓存：{STEAM_APPDETAILS_CACHE_PATH}")
+        st.caption(f"Steam 评价摘要缓存：{STEAM_REVIEW_STATS_CACHE_PATH}")
+        st.caption(f"Steam 图片缓存：{STEAM_IMAGE_CACHE_PATH}")
+        st.caption(f"首页快照 CSV：{HOME_SNAPSHOT_CSV_PATH}")
+        st.caption(f"首页快照图片目录：{HOME_SNAPSHOT_IMAGE_DIR}")
+        st.write(
+            {
+                "steam_home_feed_success": steam_feed.success,
+                "steam_home_feed_fetched_at": steam_feed.fetched_at,
+                "steam_home_feed_from_cache": steam_feed.from_cache,
+                "steam_home_feed_used_stale_cache": steam_feed.used_stale_cache,
+                "steam_home_feed_message": steam_feed.message,
+                "steam_home_feed_group_counts": steam_group_counts,
+                "steam_home_feed_errors": steam_feed.errors[:6],
+                "appdetails_success_count": appdetails_success_count,
+                "appdetails_failure_count": appdetails_failure_count,
+                "appdetails_cache_entries": len(appdetails_cache),
+                "appdetails_cache_hit_count": appdetails_cache_hit_count,
+                "cache_missing_fields_count": appdetails_missing_fields_count,
+                "current_group": filter_debug.get("current_group", ""),
+                "current_group_raw_count": filter_debug.get("raw_partition_count", 0),
+                "old_game_filtered_count": filter_debug.get("old_game_filtered_count", 0),
+                "current_group_final_count": filter_debug.get("final_count", 0),
+                "visible_appdetails_success_count": visible_appdetails_stats.get("success", 0),
+                "visible_review_stats_success_count": visible_review_stats.get("success", 0),
+                "visible_review_stats_failed_count": visible_review_stats.get("failed", 0),
+                "visible_review_stats_cache_hit_count": visible_review_stats.get("cache_hit", 0),
+                "visible_review_stats_refetched_count": visible_review_stats.get("refetched", 0),
+                "visible_appdetails_failure_count": visible_appdetails_stats.get("failed", 0),
+                "visible_appdetails_cache_missing_fields_count": visible_appdetails_stats.get("cache_missing_fields", 0),
+                "visible_appdetails_refetched_count": visible_appdetails_stats.get("refetched", 0),
+                "steamdb_auto_fetch": "已跳过，首页仅保留入口卡。",
+                "feed_refreshed_at": feed.refreshed_at,
+                "from_cache": feed.from_cache,
+                "used_stale_cache": feed.used_stale_cache,
+                "message": feed.message,
+                "section_counts": {key: len(value) for key, value in feed.sections.items()},
+                "news_count": len(feed.news),
+                "snapshot_count": len(snapshots),
+            }
+        )
+
+
+def send_daily_watch_to_profile(row: pd.Series) -> None:
+    appid = str(row.get("appid", "") or "").strip()
+    steam_url = str(row.get("steam_url", "") or "").strip()
+    source_url = str(row.get("source_url", "") or "").strip()
+    game_name = str(row.get("game_name", "") or "").strip()
+    developer = str(row.get("developer", "") or "").strip()
+    publisher = str(row.get("publisher", "") or "").strip()
+    genres = str(row.get("genres", "") or "").strip()
+    release_date = str(row.get("release_date", "") or "").strip()
+    price = str(row.get("price", "") or "").strip()
+    supports_schinese = str(row.get("supports_schinese", "") or "").strip()
+    has_demo = str(row.get("has_demo", "") or "").strip()
+    st.session_state["profile_steam_input"] = steam_url or steam_url_from_appid(appid) or source_url or appid
+    if game_name:
+        st.session_state["profile_chinese_name"] = game_name
+    st.session_state["profile_prefill_metadata"] = {
+        "appid": appid,
+        "game_name": game_name,
+        "steam_url": steam_url or steam_url_from_appid(appid) or source_url,
+        "developer": developer,
+        "publisher": publisher,
+        "genres": genres,
+        "release_date": release_date,
+        "price": price,
+        "supports_schinese": supports_schinese,
+        "has_demo": has_demo,
+        "review_total": str(row.get("review_total", "") or "").strip(),
+        "review_positive": str(row.get("review_positive", "") or "").strip(),
+        "review_negative": str(row.get("review_negative", "") or "").strip(),
+        "positive_rate": str(row.get("positive_rate", "") or "").strip(),
+        "review_score_desc": str(row.get("review_score_desc", "") or "").strip(),
+        "median_playtime_hours": str(row.get("median_playtime_hours", "") or "").strip(),
+        "avg_playtime_hours": str(row.get("avg_playtime_hours", "") or "").strip(),
+        "review_stats_status": str(row.get("review_stats_status", "") or "").strip(),
+    }
+    metadata_keywords = "\n".join(
+        part
+        for part in [
+            f"开发商：{developer}" if developer and developer != "未获取" else "",
+            f"发行商：{publisher}" if publisher and publisher != "未获取" else "",
+            f"类型：{genres}" if genres and genres != "未获取" else "",
+            f"发售日期：{release_date}" if release_date and release_date != "未获取" else "",
+        ]
+        if part
+    )
+    if metadata_keywords and not st.session_state.get("profile_user_keywords"):
+        st.session_state["profile_user_keywords"] = metadata_keywords
+    st.session_state["pending_home_target"] = "profile"
+    st.rerun()
+
+
+def send_daily_watch_to_search_center(row: pd.Series) -> None:
+    appid = str(row.get("appid", "") or "").strip()
+    game_name = str(row.get("game_name", "") or "").strip() or (f"AppID {appid}" if appid else "")
+    source = str(row.get("source", "") or "").strip()
+    note = str(row.get("note", "") or "").strip()
+    source_url = str(row.get("source_url", "") or "").strip()
+    developer = str(row.get("developer", "") or "").strip()
+    publisher = str(row.get("publisher", "") or "").strip()
+    genres = str(row.get("genres", "") or "").strip()
+    tags = str(row.get("tags", "") or "").strip()
+    release_date = str(row.get("release_date", "") or "").strip()
+    source_group = str(row.get("source_group", "") or "").strip()
+    search_values = {
+        "game_name": game_name,
+        "steam_url": steam_url_from_appid(appid) or source_url,
+        "short_description": " / ".join(value for value in [note, release_date] if value and value != "未获取"),
+        "tags": ", ".join(value for value in [genres, tags, source_group or source] if value and value != "未获取"),
+        "core_keywords": ", ".join(value for value in [game_name, appid, developer, publisher, genres] if value and value != "未获取"),
+        "theme_keywords": ", ".join(value for value in [genres, tags, source_group or source] if value and value != "未获取"),
+        "english_keywords": "",
+        "reference_games": "",
+        "developer": developer if developer != "未获取" else "",
+        "publisher": publisher if publisher != "未获取" else "",
+    }
+    apply_search_center_values(search_values)
+    st.session_state["pending_home_target"] = "search"
+    try:
+        platforms = load_search_platforms(SEARCH_PLATFORM_CONFIG_PATH)
+        navigation_table = build_platform_navigation(
+            SearchCenterInput(**search_values),
+            platforms,
+            limit=int(st.session_state.get("search_keyword_limit", 20)),
+        )
+    except Exception as exc:
+        st.error(f"搜索中心生成失败：{exc}")
+        return
+    st.session_state["search_navigation_table"] = navigation_table
+    st.rerun()
+
+
+def render_steamdb_discovery_page() -> None:
+    """Render SteamDB navigation, templates, watch notes, and import handoff."""
+    ensure_template_csv_exists(STEAMDB_TEMPLATE_CSV_PATH)
+    ensure_watch_note_csv_exists(STEAMDB_WATCH_NOTE_CSV_PATH)
+
+    st.subheader("SteamDB 发现工作台")
+    st.caption("只做 SteamDB 常用页面导航、筛选模板、榜单观察记录和项目导入；不自动抓 SteamDB 榜单内容。")
+
+    render_steamdb_common_links()
+    render_steamdb_template_section()
+    render_steamdb_watch_note_section()
+    render_steamdb_import_section()
+
+
+def render_steamdb_common_links() -> None:
+    st.markdown("### 常用榜单入口")
+    groups = get_steamdb_common_link_groups()
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown("**新作发现**")
+        render_link_button_grid(groups["新作发现"], "steamdb_discovery")
+    with col2:
+        st.markdown("**热度观察**")
+        render_link_button_grid(groups["热度观察"], "steamdb_heat")
+    with col3:
+        st.markdown("**活动 / 新品节**")
+        render_link_button_grid(groups["活动 / 新品节"], "steamdb_event")
+        st.caption("Next Fest 或活动页先手动筛选，再把 URL 保存为模板。")
+
+
+def render_link_button_grid(links: list[tuple[str, str]], key_prefix: str) -> None:
+    for label, url in links:
+        st.link_button(label, url, use_container_width=True)
+
+
+def render_steamdb_template_section() -> None:
+    st.markdown("### 我的筛选模板")
+    with st.form("steamdb_template_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            template_name = st.text_input("模板名称", placeholder="例如：Next Fest 卡牌肉鸽观察")
+            template_category = st.selectbox(
+                "分类",
+                ["新作发现", "热度观察", "活动 / 新品节", "自定义筛选", "Other"],
+            )
+            is_favorite = st.checkbox("收藏模板", value=True)
+        with col2:
+            steamdb_url = st.text_input(
+                "SteamDB 筛选链接",
+                placeholder="https://steamdb.info/stats/gameratings/2026/",
+            )
+            template_note = st.text_area("备注", height=88, placeholder="记录筛选条件、活动名或观察用途")
+        save_template = st.form_submit_button("保存当前 SteamDB 链接为模板")
+
+    if save_template:
+        if not template_name.strip() or not steamdb_url.strip():
+            st.error("请填写模板名称和 SteamDB 链接。")
+        elif "steamdb.info" not in steamdb_url:
+            st.error("请填写 SteamDB 链接。")
+        else:
+            template = SteamDBTemplate(
+                template_name=template_name.strip(),
+                category=template_category,
+                steamdb_url=steamdb_url.strip(),
+                note=template_note.strip(),
+                is_favorite="True" if is_favorite else "False",
+            )
+            save_template_to_csv(template, STEAMDB_TEMPLATE_CSV_PATH)
+            st.success("已保存 SteamDB 筛选模板。")
+
+    templates = load_templates(STEAMDB_TEMPLATE_CSV_PATH)
+    if templates.empty:
+        st.info("暂无 SteamDB 模板。")
+        return
+
+    display_templates = templates.rename(
+        columns={
+            "template_name": "模板名称",
+            "category": "分类",
+            "steamdb_url": "SteamDB 链接",
+            "note": "备注",
+            "is_favorite": "收藏",
+            "created_at": "创建时间",
+        }
+    )
+    st.dataframe(
+        display_templates.loc[:, ["模板名称", "分类", "SteamDB 链接", "备注", "收藏", "创建时间"]],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    with st.expander("打开已保存模板", expanded=False):
+        for index, row in templates.head(30).iterrows():
+            label = str(row.get("template_name", "")).strip() or f"SteamDB 模板 {index + 1}"
+            url = str(row.get("steamdb_url", "")).strip()
+            if url:
+                st.link_button(f"{index + 1}. {label}", url)
+
+
+def render_steamdb_watch_note_section() -> None:
+    st.markdown("### 榜单观察记录")
+    st.caption("从 SteamDB 表格手动摘录重点字段：Name、Release、Follows、Reviews、Peak、Rating、Price。")
+
+    with st.form("steamdb_watch_note_form"):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            source_page = st.selectbox(
+                "来源页面",
+                [
+                    "Top Rated",
+                    "Charts",
+                    "Trending Followers",
+                    "Wishlist Activity",
+                    "Most Wishlisted",
+                    "Upcoming",
+                    "Calendar",
+                    "Next Fest",
+                    "Other",
+                ],
+            )
+            game_name = st.text_input("游戏名")
+            appid_input = st.text_input("AppID")
+            steamdb_url = st.text_input("SteamDB 链接", placeholder="https://steamdb.info/app/3915640/")
+        with col2:
+            steam_url = st.text_input("Steam 链接", placeholder="https://store.steampowered.com/app/3915640/")
+            source_url = st.text_input("来源榜单链接")
+            rank_text = st.text_input("排名/位置")
+            release_date = st.text_input("发售日期")
+        with col3:
+            followers = st.text_input("Followers")
+            reviews = st.text_input("Reviews")
+            rating = st.text_input("Rating")
+            peak_players = st.text_input("Peak")
+            price = st.text_input("价格")
+
+        note_text = st.text_area("备注", height=80)
+        next_action = st.selectbox("下一步动作", ["生成项目画像", "加入候选", "暂缓", "放弃", "待试玩"])
+        save_note = st.form_submit_button("保存榜单观察记录")
+
+    if save_note:
+        appid = parse_steamdb_appid(appid_input) or parse_steamdb_appid(steamdb_url) or parse_steamdb_appid(steam_url)
+        resolved_steam_url = steam_url.strip() or steam_url_from_appid(appid)
+        resolved_steamdb_url = steamdb_url.strip() or steamdb_app_url_from_appid(appid)
+        if not game_name.strip() and not appid:
+            st.error("请至少填写游戏名或 AppID。")
+        else:
+            watch_note = SteamDBWatchNote(
+                source_page=source_page,
+                source_url=source_url.strip() or resolved_steamdb_url,
+                game_name=game_name.strip(),
+                appid=appid,
+                steam_url=resolved_steam_url,
+                steamdb_url=resolved_steamdb_url,
+                rank_text=rank_text.strip(),
+                release_date=release_date.strip(),
+                followers=followers.strip(),
+                reviews=reviews.strip(),
+                rating=rating.strip(),
+                peak_players=peak_players.strip(),
+                price=price.strip(),
+                note=note_text.strip(),
+                next_action=next_action,
+            )
+            save_watch_note_to_csv(watch_note, STEAMDB_WATCH_NOTE_CSV_PATH)
+            st.success("已保存 SteamDB 榜单观察记录。")
+
+    watch_notes = load_watch_notes(STEAMDB_WATCH_NOTE_CSV_PATH)
+    if watch_notes.empty:
+        st.info("暂无榜单观察记录。")
+        return
+
+    display_notes = watch_notes.rename(
+        columns={
+            "created_at": "创建时间",
+            "source_page": "来源页面",
+            "game_name": "游戏名",
+            "appid": "AppID",
+            "rank_text": "排名/位置",
+            "release_date": "发售日期",
+            "followers": "Followers",
+            "reviews": "Reviews",
+            "rating": "Rating",
+            "peak_players": "Peak",
+            "price": "价格",
+            "next_action": "下一步动作",
+            "note": "备注",
+        }
+    )
+    st.dataframe(
+        display_notes.loc[
+            :,
+            [
+                "创建时间",
+                "来源页面",
+                "游戏名",
+                "AppID",
+                "排名/位置",
+                "发售日期",
+                "Followers",
+                "Reviews",
+                "Rating",
+                "Peak",
+                "价格",
+                "下一步动作",
+                "备注",
+            ],
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
+    render_steamdb_watch_note_handoff(watch_notes)
+
+
+def render_steamdb_watch_note_handoff(watch_notes: pd.DataFrame) -> None:
+    with st.expander("从观察记录发送到项目画像或搜索中心", expanded=False):
+        options = []
+        for _, row in watch_notes.tail(50).iterrows():
+            game_name = str(row.get("game_name", "")).strip() or "未命名游戏"
+            appid = str(row.get("appid", "")).strip()
+            created_at = str(row.get("created_at", "")).strip()
+            record_id = str(row.get("record_id", "")).strip()
+            label = f"{game_name} | {appid or '无 AppID'} | {created_at}"
+            options.append({"label": label, "record_id": record_id})
+        if not options:
+            st.info("暂无可联动的观察记录。")
+            return
+
+        selected_label = st.selectbox(
+            "选择观察记录",
+            [option["label"] for option in options],
+            key="steamdb_watch_note_selector",
+        )
+        selected_id = next(option["record_id"] for option in options if option["label"] == selected_label)
+        selected_rows = watch_notes.loc[watch_notes["record_id"].astype(str) == str(selected_id)]
+        if selected_rows.empty:
+            st.warning("未找到所选观察记录。")
+            return
+        selected = selected_rows.iloc[0]
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            if st.button("发送所选观察到项目画像"):
+                send_steamdb_row_to_profile(selected)
+        with col2:
+            if st.button("发送所选观察到搜索中心"):
+                send_steamdb_row_to_search_center(selected)
+        with col3:
+            if st.button("保存所选为快速项目记录"):
+                save_steamdb_row_as_project(selected)
+
+
+def render_steamdb_import_section() -> None:
+    st.markdown("### 快速导入项目")
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        import_input = st.text_input(
+            "AppID 或 SteamDB App 链接",
+            key="steamdb_import_input",
+            placeholder="https://steamdb.info/app/3915640/",
+        )
+    with col2:
+        import_game_name = st.text_input("游戏名（可选）", key="steamdb_import_game_name")
+
+    appid = parse_steamdb_appid(import_input)
+    if import_input.strip() and not appid:
+        st.warning("未能解析 AppID，请输入纯数字 AppID 或 SteamDB App 链接。")
+        return
+    if not appid:
+        st.info("输入 AppID 后会生成 Steam / SteamDB 单 App 快捷入口。")
+        return
+
+    st.success(f"已解析 AppID：{appid}")
+    link_columns = st.columns(4)
+    for index, (label, url) in enumerate(steamdb_quick_links(appid)):
+        with link_columns[index % 4]:
+            st.link_button(label, url, use_container_width=True)
+
+    row_data = pd.Series(
+        {
+            "game_name": import_game_name.strip(),
+            "appid": appid,
+            "steam_url": steam_url_from_appid(appid),
+            "steamdb_url": steamdb_app_url_from_appid(appid),
+            "source_page": "Quick Import",
+            "source_url": steamdb_app_url_from_appid(appid),
+            "next_action": "生成项目画像",
+            "note": "来自 SteamDB 发现工作台快速导入",
+        }
+    )
+    action_col1, action_col2, action_col3 = st.columns(3)
+    with action_col1:
+        if st.button("发送到一键项目画像", key="steamdb_send_profile"):
+            send_steamdb_row_to_profile(row_data)
+    with action_col2:
+        if st.button("发送到搜索中心", key="steamdb_send_search"):
+            send_steamdb_row_to_search_center(row_data)
+    with action_col3:
+        if st.button("保存为快速项目记录", key="steamdb_save_project"):
+            save_steamdb_row_as_project(row_data)
+
+
+def send_steamdb_row_to_profile(row: pd.Series) -> None:
+    appid = str(row.get("appid", "") or "").strip()
+    steam_url = str(row.get("steam_url", "") or "").strip() or steam_url_from_appid(appid)
+    game_name = str(row.get("game_name", "") or "").strip()
+    st.session_state["profile_steam_input"] = steam_url or appid
+    if game_name:
+        st.session_state["profile_chinese_name"] = game_name
+    st.success("已发送到一键项目画像。切换到该 Tab 后点击生成项目画像草稿。")
+
+
+def send_steamdb_row_to_search_center(row: pd.Series) -> None:
+    appid = str(row.get("appid", "") or "").strip()
+    game_name = str(row.get("game_name", "") or "").strip() or (f"AppID {appid}" if appid else "")
+    steam_url = str(row.get("steam_url", "") or "").strip() or steam_url_from_appid(appid)
+    source_page = str(row.get("source_page", "") or "").strip()
+    note = str(row.get("note", "") or "").strip()
+    search_values = {
+        "game_name": game_name,
+        "steam_url": steam_url,
+        "short_description": note,
+        "tags": source_page,
+        "core_keywords": ", ".join(value for value in [game_name, appid, source_page] if value),
+        "theme_keywords": source_page,
+        "english_keywords": "",
+        "reference_games": "",
+        "developer": "",
+        "publisher": "",
+    }
+    apply_search_center_values(search_values)
+    try:
+        platforms = load_search_platforms(SEARCH_PLATFORM_CONFIG_PATH)
+        navigation_table = build_platform_navigation(
+            SearchCenterInput(**search_values),
+            platforms,
+            limit=int(st.session_state.get("search_keyword_limit", 20)),
+        )
+    except Exception as exc:
+        st.error(f"搜索中心生成失败：{exc}")
+        return
+    st.session_state["search_navigation_table"] = navigation_table
+    st.success("已发送到搜索中心并生成搜索入口。")
+
+
+def save_steamdb_row_as_project(row: pd.Series) -> None:
+    appid = str(row.get("appid", "") or "").strip()
+    game_name = str(row.get("game_name", "") or "").strip() or (f"AppID {appid}" if appid else "SteamDB 未命名项目")
+    project = ProjectCard(
+        game_name=game_name,
+        steam_url=str(row.get("steam_url", "") or "").strip() or steam_url_from_appid(appid),
+        appid=appid,
+        release_status=str(row.get("release_date", "") or "").strip(),
+        first_impression="来自 SteamDB 发现工作台观察记录。",
+        china_publishing_opportunity="待项目画像和人工复核。",
+        risks=str(row.get("note", "") or "").strip(),
+        next_action=str(row.get("next_action", "") or "").strip() or "生成项目画像",
+    )
+    save_project_to_csv(project, CSV_PATH)
+    st.success(f"已保存为快速项目记录：{game_name}")
+
+
+def render_history_records() -> None:
+    """折叠展示历史项目记录和 Excel 导出按钮。"""
+    all_projects = load_projects(CSV_PATH, include_deleted=True)
+    visible_count = len(load_projects(CSV_PATH, include_deleted=False))
+
+    with st.expander(f"历史项目记录（共 {visible_count} 条）", expanded=False):
+        filter_col1, filter_col2, filter_col3 = st.columns(3)
+        with filter_col1:
+            game_name_query = st.text_input("按游戏名搜索")
+        with filter_col2:
+            appid_query = st.text_input("按 AppID 搜索")
+        with filter_col3:
+            release_options = ["全部"] + sorted(
+                [status for status in all_projects["release_status"].dropna().unique().tolist() if status]
+            )
+            release_status = st.selectbox("按发售状态筛选", release_options)
+
+        show_deleted = st.checkbox("显示已删除记录")
+        show_more = st.checkbox("查看完整历史表（超过最近 10 条）")
+        show_full = st.checkbox("显示完整字段")
+        source_projects = load_projects(CSV_PATH, include_deleted=show_deleted)
+        filtered_projects = filter_projects(source_projects, game_name_query, appid_query, release_status)
+        displayed_projects = filtered_projects if show_more else filtered_projects.tail(10)
+        history_data = get_history_display_data(displayed_projects, show_full=show_full)
+
+        if history_data.empty:
+            st.info("暂无项目记录")
+        else:
+            if not show_more:
+                st.caption("默认显示最近 10 条。勾选“查看完整历史表”可显示更多记录。")
+            st.dataframe(history_data, use_container_width=True)
+            render_project_delete_actions(displayed_projects)
+
+        if st.button("导出可读 Excel"):
+            excel_path = export_projects_to_excel(
+                CSV_PATH,
+                EXCEL_REPORT_PATH,
+                COMPETITOR_CSV_PATH,
+                CANDIDATE_CSV_PATH,
+                STEAMDB_WATCH_NOTE_CSV_PATH,
+                STEAMDB_TEMPLATE_CSV_PATH,
+                DAILY_WATCH_CSV_PATH,
+                HOME_SNAPSHOT_CSV_PATH,
+                STEAM_HOME_FEED_CACHE_PATH,
+                STEAM_APPDETAILS_CACHE_PATH,
+                STEAM_REVIEW_STATS_CACHE_PATH,
+            )
+            st.success(f"Excel 已导出：{excel_path}")
+
+
+def render_project_delete_actions(filtered_projects) -> None:
+    """渲染项目软删除和恢复操作。"""
+    options = build_project_action_options(filtered_projects)
+    if not options:
+        return
+
+    selected_label = st.selectbox("选择项目进行删除/恢复", [option["label"] for option in options])
+    selected_option = next(option for option in options if option["label"] == selected_label)
+
+    delete_col, restore_col = st.columns(2)
+    with delete_col:
+        if st.button("标记删除"):
+            update_project_deleted(CSV_PATH, selected_option["record_id"], True)
+            st.success("项目已标记删除。")
+    with restore_col:
+        if st.button("恢复记录"):
+            update_project_deleted(CSV_PATH, selected_option["record_id"], False)
+            st.success("项目已恢复。")
+
+
+def render_docs_status_page() -> None:
+    """渲染文档与状态入口。"""
+    st.subheader("文档与状态")
+    st.markdown(
+        """
+- 当前版本：V0.6.0 Steam 日常雷达
+- 数据文件：`data/projects.csv`、`data/competitors.csv`、`data/competitor_candidates.csv`、`data/steamdb_watch_notes.csv`、`data/steamdb_link_templates.csv`、`data/daily_watch_notes.csv`、`data/home_snapshots.csv`、`data/cache/steam_home_feed_cache.json`、`data/cache/steam_appdetails_cache.json`、`data/cache/steam_review_stats_cache.json`、`data/cache/home_feed_cache.json`、`data/cache/steam_images_cache.json`
+- 图片目录：`data/snapshots/`
+- 报告目录：`reports/markdown/`、`reports/txt/`、`reports/excel/`、`reports/profile/`
+- 搜索中心导出目录：`exports/`
+- 说明文档：`README.md`、`CHANGELOG.md`、`docs/PROJECT_STATUS.md`、`docs/NEXT_STEPS.md`
+"""
+    )
+
+
+def main() -> None:
+    """启动 Streamlit 主页面。"""
+    ensure_csv_exists(CSV_PATH)
+    ensure_competitor_csv_exists(COMPETITOR_CSV_PATH)
+    ensure_candidate_csv_exists(CANDIDATE_CSV_PATH)
+    ensure_template_csv_exists(STEAMDB_TEMPLATE_CSV_PATH)
+    ensure_watch_note_csv_exists(STEAMDB_WATCH_NOTE_CSV_PATH)
+    ensure_daily_watch_csv_exists(DAILY_WATCH_CSV_PATH)
+    ensure_home_snapshot_csv_exists(HOME_SNAPSHOT_CSV_PATH)
+    HOME_SNAPSHOT_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+
+    st.set_page_config(page_title="Steam 项目初筛助手", layout="wide")
+
+    st.sidebar.title("Steam 项目初筛助手")
+    st.sidebar.info("当前版本：V0.6.0 Steam 日常雷达")
+    st.sidebar.warning(
+        "退出提醒\n\n"
+        "- 关闭浏览器标签页不会关闭后台服务。\n"
+        "- 正常退出请关闭启动窗口，或双击 停止_项目初筛助手.bat。\n"
+        "- 如果下次打不开，先运行 停止_项目初筛助手.bat。"
+    )
+    if st.sidebar.button("复制停止命令"):
+        st.sidebar.code("停止_项目初筛助手.bat", language="bat")
+
+    st.title("Steam 项目初筛助手")
+    st.caption("当前版本聚焦 Steam 日常雷达：好评率、评测数、评测样本游玩时间、评价筛选和统一画像数据链路。")
+
+    home_tab, quick_tab, profile_tab, steamdb_tab, search_tab, demo_tab, competitor_tab, history_tab, docs_tab = st.tabs(
+        ["首页 / 今日看板", "快速记录", "一键项目画像", "SteamDB 发现", "搜索中心", "Demo 试玩", "竞品与候选", "历史与导出", "文档与状态"]
+    )
+
+    with home_tab:
+        render_home_dashboard_page()
+    with quick_tab:
+        render_quick_record_page()
+    with profile_tab:
+        render_profile_draft_page()
+    with steamdb_tab:
+        render_steamdb_discovery_page()
+    with search_tab:
+        render_search_center_page()
+    with demo_tab:
+        render_demo_review_page()
+    with competitor_tab:
+        render_competitor_candidate_page()
+    with history_tab:
+        render_history_records()
+    with docs_tab:
+        render_docs_status_page()
+
+
+if __name__ == "__main__":
+    main()

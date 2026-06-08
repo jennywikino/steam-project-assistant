@@ -1,0 +1,32 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Logs and debug
+logs/
+*.log
+debug/
+
+# Runtime cache
+data/cache/
+
+# Generated reports / exports
+exports/
+reports/
+
+# Local temp
+*.tmp
+*.bak
+
+# Secrets / local config
+.env
+*.key
+*.pem
+config/secrets.*

@@ -1,0 +1,34 @@
+PROJECT_STATUS
+
+当前项目状态
+
+项目名称：Steam 项目初筛助手
+当前版本：V0.3.6 可用性修复
+当前定位：本地 Steam 项目初筛工作台
+
+当前已完成
+
+1. V0.1 项目基础卡
+2. V0.2 Demo 试玩记录
+3. V0.2.1 历史记录、中文字段、Excel 导出
+4. V0.3 竞品对照表
+5. V0.3.5 竞品候选发现器
+6. V0.3.6 可用性修复
+
+当前数据文件
+
+- data/projects.csv
+- data/competitors.csv
+- data/competitor_candidates.csv
+
+当前报告目录
+
+- reports/markdown/
+- reports/txt/
+- reports/excel/
+
+当前启动文件
+
+- 启动_项目初筛助手.bat
+- 启动_最小化.bat
+- 停止_项目初筛助手.bat
