@@ -30,3 +30,6 @@ reports/
 *.key
 *.pem
 config/secrets.*
+
+# Local work data
+data/
