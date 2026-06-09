@@ -3,6 +3,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
+from modules.external_intel import (
+    build_external_intel_markdown_section,
+    filter_external_intel,
+    load_external_intel,
+)
 from modules.genre_signal_extractor import GenreSignals, extract_genre_signals, genre_signals_to_dict
 
 
@@ -212,7 +219,7 @@ def _markdown_quick_screening(profile: ProjectProfile) -> str:
         return "\n".join(
             [
                 "- 数据不足：缺少游戏名、类型、截图/视频等核心信息，或只有少量 Steam 字段。",
-                "- 当前只能做记录，不能做发行判断。",
+                "- 当前只能做记录，需人工验证。",
                 "- 下一步动作：补商店截图、视频、Demo、评测或社区声量。",
             ]
         )
@@ -250,15 +257,16 @@ def _markdown_quick_screening(profile: ProjectProfile) -> str:
     return "\n".join(lines)
 
 
-def profile_to_markdown(profile: ProjectProfile) -> str:
+def profile_to_markdown(profile: ProjectProfile, external_intel_records: pd.DataFrame | None = None) -> str:
     game_name = profile.basic_info.get("游戏名", PLACEHOLDER)
     info = profile.raw_store_info or {}
     tags = profile.basic_info.get("类型/标签", PLACEHOLDER)
     data_quality_level = profile.data_quality_level or "low"
     data_quality_note = ""
     if data_quality_level != "high":
-        data_quality_note = "\n当前信息不足，仅生成初筛记录，不构成发行判断。\n"
+        data_quality_note = "\n当前信息不足，仅生成项目初筛记录，需人工验证。\n"
     quick_section = _markdown_quick_screening(profile)
+    external_section = build_external_intel_markdown_section(external_intel_records)
     return f"""# {game_name} 项目画像草稿
 {data_quality_note}
 ## 0. 快速初筛
@@ -281,32 +289,40 @@ def profile_to_markdown(profile: ProjectProfile) -> str:
 - 视频数量：{profile.basic_info.get("视频/Trailer 数量", PLACEHOLDER)}
 - 短描述：{_value(info.get("short_description"))}
 
-## 3. 人工确认项
+{external_section}
+## 5. 人工确认项
 - Demo 前 15 分钟是否抓人
 - 是否已有发行/区域代理
 - 核心循环是否成立
 - 中文区玩家是否可能有兴趣
 
-## 4. 信息限制
+## 6. 信息限制
 - 基于 Steam 商店公开信息和 Steam 评测样本
 - 需试玩复核
 """
 
 
-def profile_to_text(profile: ProjectProfile) -> str:
-    text = re.sub(r"^#+\s*", "", profile_to_markdown(profile), flags=re.MULTILINE)
+def profile_to_text(profile: ProjectProfile, external_intel_records: pd.DataFrame | None = None) -> str:
+    text = re.sub(r"^#+\s*", "", profile_to_markdown(profile, external_intel_records), flags=re.MULTILINE)
     text = text.replace("- ", "")
     return text.strip() + "\n"
 
 
-def save_profile_reports(profile: ProjectProfile, report_dir: Path) -> tuple[Path, Path]:
+def save_profile_reports(profile: ProjectProfile, report_dir: Path, external_intel_csv_path: Path | None = None) -> tuple[Path, Path]:
     report_dir.mkdir(parents=True, exist_ok=True)
     game_name = profile.basic_info.get("游戏名", "") or "未命名项目"
     filename_stem = f"{safe_filename(game_name)}_项目画像"
     markdown_path = report_dir / f"{filename_stem}.md"
     txt_path = report_dir / f"{filename_stem}.txt"
-    markdown_path.write_text(profile_to_markdown(profile), encoding="utf-8")
-    txt_path.write_text(profile_to_text(profile), encoding="utf-8")
+    external_intel_records = pd.DataFrame()
+    if external_intel_csv_path is not None:
+        external_intel_records = filter_external_intel(
+            load_external_intel(external_intel_csv_path),
+            appid=profile.basic_info.get("AppID", ""),
+            game_name=game_name,
+        )
+    markdown_path.write_text(profile_to_markdown(profile, external_intel_records), encoding="utf-8")
+    txt_path.write_text(profile_to_text(profile, external_intel_records), encoding="utf-8")
     return markdown_path, txt_path
 
 

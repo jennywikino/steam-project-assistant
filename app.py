@@ -27,12 +27,33 @@ from modules.competitor_compare import (
     save_competitor_to_csv,
 )
 from modules.daily_watch import (
+    DAILY_WATCH_COLUMNS,
     DailyWatchNote,
     ensure_daily_watch_csv_exists,
     load_daily_watch_notes,
     save_daily_watch_note_to_csv,
 )
 from modules.excel_exporter import export_projects_to_excel
+from modules.external_intel import (
+    EVIDENCE_TYPE_OPTIONS,
+    EXTERNAL_INTEL_FIELD_LABELS,
+    PLATFORM_OPTIONS,
+    RELEVANCE_OPTIONS,
+    SENTIMENT_OPTIONS,
+    ExternalIntelRecord,
+    delete_external_intel_records,
+    duplicate_record_ids_to_delete,
+    ensure_external_intel_csv_exists,
+    filter_external_intel_library,
+    find_duplicate_external_intel,
+    filter_external_intel,
+    format_count,
+    load_external_intel,
+    parse_count,
+    save_external_intel_to_csv,
+    summarize_external_intel,
+    update_external_intel_record,
+)
 from modules.external_title_clue_extractor import (
     extract_external_title_clues,
     fetch_external_title_clues,
@@ -126,6 +147,7 @@ STEAMDB_TEMPLATE_CSV_PATH = BASE_DIR / "data" / "steamdb_link_templates.csv"
 STEAMDB_WATCH_NOTE_CSV_PATH = BASE_DIR / "data" / "steamdb_watch_notes.csv"
 DAILY_WATCH_CSV_PATH = BASE_DIR / "data" / "daily_watch_notes.csv"
 HOME_SNAPSHOT_CSV_PATH = BASE_DIR / "data" / "home_snapshots.csv"
+EXTERNAL_INTEL_CSV_PATH = BASE_DIR / "data" / "external_intel.csv"
 HOME_SNAPSHOT_IMAGE_DIR = BASE_DIR / "data" / "snapshots"
 HOME_FEED_CACHE_PATH = BASE_DIR / "data" / "cache" / "home_feed_cache.json"
 STEAM_HOME_FEED_CACHE_PATH = BASE_DIR / "data" / "cache" / "steam_home_feed_cache.json"
@@ -502,7 +524,7 @@ def render_profile_draft(profile: ProjectProfile) -> None:
     st.caption(f"数据充分性：{_data_quality_label(data_quality_level)}")
 
     if data_quality_level == "low":
-        st.warning("数据不足，需人工验证。当前只能做记录，不能做发行判断。")
+        st.warning("数据不足，需人工验证。当前只能做项目初筛记录。")
         st.write("下一步动作：补商店截图、视频、Demo、评测或社区声量。")
     elif data_quality_level == "medium":
         type_col, selling_col = st.columns([1, 2])
@@ -549,6 +571,8 @@ def render_profile_draft(profile: ProjectProfile) -> None:
     if review_status:
         st.caption(f"评测状态：{review_status}")
     st.caption("基于公开信息生成，需试玩复核。")
+
+    render_profile_external_intel(profile)
 
     data_source_items = [
         f"Steam AppID：{profile.basic_info.get('AppID', PLACEHOLDER)}",
@@ -694,9 +718,9 @@ def _data_quality_label(level: str) -> str:
     labels = {
         "high": "高，可以做弱初筛",
         "medium": "中，缺少评测/游玩时长",
-        "low": "低，不能做发行判断",
+        "low": "低，需人工验证",
     }
-    return labels.get(str(level or "").strip(), "低，不能做发行判断")
+    return labels.get(str(level or "").strip(), "低，需人工验证")
 
 
 def render_profile_bullet_section(title: str, items: list[str]) -> None:
@@ -734,6 +758,479 @@ def _specific_items(items: list[str]) -> list[str]:
 def _first_specific_item(items: list[str]) -> str:
     values = _specific_items(items)
     return values[0] if values else ""
+
+
+def render_profile_external_intel(profile: ProjectProfile) -> None:
+    appid = _external_display_source_value(profile.basic_info.get("AppID", ""))
+    game_name = _external_display_source_value(profile.basic_info.get("游戏名", ""))
+    all_records = load_external_intel(EXTERNAL_INTEL_CSV_PATH)
+    records = filter_external_intel(all_records, appid=appid, game_name=game_name)
+    summary = summarize_external_intel(records)
+
+    st.markdown("### 外部声量摘要")
+    if summary["record_count"] <= 0:
+        st.info("暂无外部情报记录。")
+    else:
+        metric_cols = st.columns(4)
+        metric_cols[0].metric("情报记录数", summary["record_count"])
+        metric_cols[1].metric("高相关记录数", summary["high_relevance_count"])
+        metric_cols[2].metric("YouTube 最高播放", summary["youtube_max_views"] or "未填写")
+        metric_cols[3].metric("B站最高播放", summary["bilibili_max_views"] or "未填写")
+
+        status_cols = st.columns(3)
+        status_cols[0].write(f"中文视频/文章：{'已有中文侧内容' if summary['has_chinese_content'] else '未填写'}")
+        status_cols[1].write(f"官网/Presskit：{'已有' if summary['has_official_or_presskit'] else '未填写'}")
+        status_cols[2].write(f"Discord / 社群：{'已有' if summary['has_community'] else '未填写'}")
+
+        for note in summary["rule_notes"]:
+            st.caption(note)
+        st.markdown("**关键结论 Top 3**")
+        if summary["key_takeaways"]:
+            for item in summary["key_takeaways"]:
+                st.write(f"- {item}")
+        else:
+            st.write("- 未填写")
+
+    with st.expander("外部情报记录", expanded=False):
+        render_external_search_links(game_name)
+        saved = render_external_intel_form(appid, game_name)
+        if saved:
+            records = filter_external_intel(load_external_intel(EXTERNAL_INTEL_CSV_PATH), appid=appid, game_name=game_name)
+        render_external_intel_history(records)
+        render_current_external_intel_export(records, appid, game_name)
+
+    with st.expander("外部情报库 / 管理", expanded=False):
+        render_external_intel_library_manager(all_records, appid, game_name)
+
+
+def render_external_intel_form(appid: str, game_name: str) -> bool:
+    _prepare_external_intel_form_state(appid, game_name)
+
+    with st.form("external_intel_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            st.text_input("AppID", key="external_intel_appid")
+            st.text_input("游戏名", key="external_intel_game_name")
+            st.selectbox("平台", PLATFORM_OPTIONS, key="external_intel_platform")
+            st.text_input("来源链接", key="external_intel_source_url")
+            st.text_input("标题", key="external_intel_title")
+            st.text_input("作者/频道", key="external_intel_author_or_channel")
+            st.text_input("发布时间", key="external_intel_published_at")
+        with col2:
+            st.text_input("播放/阅读量", key="external_intel_views")
+            st.text_input("评论数", key="external_intel_comments")
+            st.text_input("点赞数", key="external_intel_likes")
+            st.text_input("粉丝/成员数", key="external_intel_followers_or_members")
+            st.selectbox("证据类型", EVIDENCE_TYPE_OPTIONS, key="external_intel_evidence_type")
+            st.selectbox("情绪", SENTIMENT_OPTIONS, key="external_intel_sentiment")
+            st.selectbox("相关度", RELEVANCE_OPTIONS, key="external_intel_relevance")
+        st.text_area("关键结论", key="external_intel_key_takeaway", height=80)
+        st.text_area("备注", key="external_intel_note", height=80)
+
+        save_col, clear_col = st.columns(2)
+        with save_col:
+            save_record = st.form_submit_button("保存外部情报")
+        with clear_col:
+            clear_form = st.form_submit_button("清空表单")
+
+    if clear_form:
+        st.session_state["external_intel_clear_requested"] = True
+        st.rerun()
+
+    if not save_record:
+        return False
+
+    record = ExternalIntelRecord(
+        appid=_clean_external_form_value(st.session_state.get("external_intel_appid")),
+        game_name=_clean_external_form_value(st.session_state.get("external_intel_game_name")),
+        platform=_clean_external_form_value(st.session_state.get("external_intel_platform")),
+        source_url=_clean_external_form_value(st.session_state.get("external_intel_source_url")),
+        title=_clean_external_form_value(st.session_state.get("external_intel_title")),
+        author_or_channel=_clean_external_form_value(st.session_state.get("external_intel_author_or_channel")),
+        published_at=_clean_external_form_value(st.session_state.get("external_intel_published_at")),
+        views=_clean_external_form_value(st.session_state.get("external_intel_views")),
+        comments=_clean_external_form_value(st.session_state.get("external_intel_comments")),
+        likes=_clean_external_form_value(st.session_state.get("external_intel_likes")),
+        followers_or_members=_clean_external_form_value(st.session_state.get("external_intel_followers_or_members")),
+        evidence_type=_clean_external_form_value(st.session_state.get("external_intel_evidence_type")),
+        sentiment=_clean_external_form_value(st.session_state.get("external_intel_sentiment")) or "未判断",
+        relevance=_clean_external_form_value(st.session_state.get("external_intel_relevance")) or "中",
+        key_takeaway=_clean_external_form_value(st.session_state.get("external_intel_key_takeaway")),
+        note=_clean_external_form_value(st.session_state.get("external_intel_note")),
+    )
+    duplicate_note = find_external_intel_duplicate_note(record)
+    if duplicate_note:
+        st.warning(duplicate_note)
+    save_external_intel_to_csv(record, EXTERNAL_INTEL_CSV_PATH)
+    st.success(f"外部情报已保存：{EXTERNAL_INTEL_CSV_PATH}")
+    return True
+
+
+def _prepare_external_intel_form_state(appid: str, game_name: str) -> None:
+    current_profile_key = f"{appid}|{game_name}"
+    should_reset = (
+        st.session_state.get("external_intel_profile_key") != current_profile_key
+        or st.session_state.pop("external_intel_clear_requested", False)
+    )
+    if should_reset:
+        st.session_state["external_intel_profile_key"] = current_profile_key
+        st.session_state["external_intel_appid"] = appid
+        st.session_state["external_intel_game_name"] = game_name
+        st.session_state["external_intel_platform"] = "YouTube"
+        st.session_state["external_intel_source_url"] = ""
+        st.session_state["external_intel_title"] = ""
+        st.session_state["external_intel_author_or_channel"] = ""
+        st.session_state["external_intel_published_at"] = ""
+        st.session_state["external_intel_views"] = ""
+        st.session_state["external_intel_comments"] = ""
+        st.session_state["external_intel_likes"] = ""
+        st.session_state["external_intel_followers_or_members"] = ""
+        st.session_state["external_intel_evidence_type"] = "视频"
+        st.session_state["external_intel_sentiment"] = "未判断"
+        st.session_state["external_intel_relevance"] = "中"
+        st.session_state["external_intel_key_takeaway"] = ""
+        st.session_state["external_intel_note"] = ""
+
+    if st.session_state.get("external_intel_platform") not in PLATFORM_OPTIONS:
+        st.session_state["external_intel_platform"] = "其他"
+    if st.session_state.get("external_intel_evidence_type") not in EVIDENCE_TYPE_OPTIONS:
+        st.session_state["external_intel_evidence_type"] = "其他"
+    if st.session_state.get("external_intel_sentiment") not in SENTIMENT_OPTIONS:
+        st.session_state["external_intel_sentiment"] = "未判断"
+    if st.session_state.get("external_intel_relevance") not in RELEVANCE_OPTIONS:
+        st.session_state["external_intel_relevance"] = "中"
+
+
+def render_external_search_links(game_name: str) -> None:
+    st.markdown("**外部搜索入口**")
+    if not game_name:
+        st.caption("未获取游戏名，暂不能生成外部搜索入口。")
+        return
+    links = build_external_search_links(game_name)
+    columns = st.columns(3)
+    for index, (label, url) in enumerate(links):
+        with columns[index % 3]:
+            st.link_button(label, url, use_container_width=True)
+
+
+def build_external_search_links(game_name: str) -> list[tuple[str, str]]:
+    name = str(game_name or "").strip()
+    return [
+        ("YouTube gameplay", f"https://www.youtube.com/results?search_query={quote(name + ' gameplay')}"),
+        ("YouTube review", f"https://www.youtube.com/results?search_query={quote(name + ' review')}"),
+        ("B站 试玩", f"https://search.bilibili.com/all?keyword={quote(name + ' 试玩')}"),
+        ("B站 评测", f"https://search.bilibili.com/all?keyword={quote(name + ' 评测')}"),
+        ("Google review", f"https://www.google.com/search?q={quote(name + ' review')}"),
+        ("X/Twitter", f"https://twitter.com/search?q={quote(name)}&src=typed_query"),
+        ("Bluesky", f"https://bsky.app/search?q={quote(name)}"),
+        ("Reddit", f"https://www.reddit.com/search/?q={quote(name)}"),
+        ("小黑盒", f"https://www.xiaoheihe.cn/search?keyword={quote(name)}"),
+        ("NGA 站内搜索", f"https://www.baidu.com/s?wd={quote('site:ngabbs.com ' + name)}"),
+        ("百度站内搜索", f"https://www.baidu.com/s?wd={quote(name)}"),
+    ]
+
+
+def render_external_intel_history(records: pd.DataFrame) -> None:
+    st.markdown("**当前项目历史记录**")
+    if records.empty:
+        st.info("暂无外部情报记录。")
+        return
+
+    visible_records = records.tail(20).iloc[::-1]
+    header = "| 平台 | 标题 | 播放/阅读量 | 评论数 | 相关度 | 关键结论 | 来源链接 |"
+    separator = "| --- | --- | --- | --- | --- | --- | --- |"
+    lines = [header, separator]
+    for _, row in visible_records.iterrows():
+        source_url = str(row.get("source_url", "") or "").strip()
+        source_link = f"[打开]({source_url})" if source_url else "未填写"
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    _markdown_table_cell(_external_display(row.get("platform"))),
+                    _markdown_table_cell(_external_display(row.get("title"))),
+                    _markdown_table_cell(_external_count_display(row.get("views"))),
+                    _markdown_table_cell(_external_count_display(row.get("comments"))),
+                    _markdown_table_cell(_external_display(row.get("relevance"))),
+                    _markdown_table_cell(_external_display(row.get("key_takeaway"))),
+                    source_link,
+                ]
+            )
+            + " |"
+        )
+    st.markdown("\n".join(lines))
+
+
+def render_current_external_intel_export(records: pd.DataFrame, appid: str, game_name: str) -> None:
+    if st.button("导出当前项目外部情报 CSV", key="export_current_external_intel"):
+        if records.empty:
+            st.info("当前项目暂无外部情报记录可导出。")
+            return
+        SEARCH_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+        export_key = appid or game_name or "unknown"
+        export_path = SEARCH_EXPORT_DIR / f"external_intel_{sanitize_export_filename(export_key)}.csv"
+        records.to_csv(export_path, index=False, encoding="utf-8-sig")
+        st.success(f"当前项目外部情报已导出：{export_path}")
+
+
+def render_external_intel_library_manager(all_records: pd.DataFrame, current_appid: str, current_game_name: str) -> None:
+    refresh_col, status_col = st.columns([1, 3])
+    with refresh_col:
+        if st.button("刷新外部情报记录", key="external_library_refresh", use_container_width=True):
+            st.session_state["external_intel_last_loaded_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            st.rerun()
+    with status_col:
+        st.caption(f"外部情报最后读取时间：{st.session_state.get('external_intel_last_loaded_at') or st.session_state.get('home_last_loaded_at') or '未记录'}")
+    all_records = load_external_intel(EXTERNAL_INTEL_CSV_PATH)
+    filters = render_external_intel_library_filters(current_appid, current_game_name)
+    filtered = filter_external_intel_library(all_records, **filters)
+    st.caption(f"过滤结果：{len(filtered)} 条")
+    render_external_intel_library_table(filtered)
+    render_external_intel_links(filtered)
+    render_external_intel_edit_form(filtered)
+    render_external_intel_delete_form(filtered)
+    render_external_intel_dedupe_tools(all_records)
+
+
+def render_external_intel_library_filters(current_appid: str, current_game_name: str) -> dict:
+    st.markdown("**过滤器**")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        appid = st.text_input("AppID", value=current_appid, key="external_library_filter_appid")
+        platform = st.selectbox("平台", ["全部"] + PLATFORM_OPTIONS, key="external_library_filter_platform")
+    with col2:
+        game_name = st.text_input("游戏名", value=current_game_name, key="external_library_filter_game_name")
+        relevance = st.selectbox("相关度", ["全部"] + RELEVANCE_OPTIONS, key="external_library_filter_relevance")
+    with col3:
+        sentiment = st.selectbox("情绪", ["全部"] + SENTIMENT_OPTIONS, key="external_library_filter_sentiment")
+        evidence_type = st.selectbox("证据类型", ["全部"] + EVIDENCE_TYPE_OPTIONS, key="external_library_filter_evidence_type")
+    return {
+        "appid": appid,
+        "game_name": game_name,
+        "platform": platform,
+        "relevance": relevance,
+        "sentiment": sentiment,
+        "evidence_type": evidence_type,
+    }
+
+
+def render_external_intel_library_table(records: pd.DataFrame) -> None:
+    st.markdown("**情报库记录**")
+    display_columns = [
+        "created_at",
+        "appid",
+        "game_name",
+        "platform",
+        "title",
+        "author_or_channel",
+        "views",
+        "comments",
+        "relevance",
+        "sentiment",
+        "key_takeaway",
+        "source_url",
+    ]
+    if records.empty:
+        st.info("暂无匹配的外部情报记录。")
+        return
+    display = records.loc[:, [column for column in display_columns if column in records.columns]].copy()
+    st.dataframe(display.rename(columns=EXTERNAL_INTEL_FIELD_LABELS), use_container_width=True, hide_index=True)
+
+
+def render_external_intel_links(records: pd.DataFrame) -> None:
+    if records.empty:
+        return
+    link_records = records.loc[records["source_url"].astype(str).str.strip() != ""].tail(10).iloc[::-1]
+    if link_records.empty:
+        return
+    st.markdown("**可点击来源链接**")
+    for _, row in link_records.iterrows():
+        platform = _external_display(row.get("platform"))
+        title = _external_display(row.get("title"))
+        source_url = str(row.get("source_url", "") or "").strip()
+        st.markdown(f"- {platform} · {title}：[打开链接]({source_url})")
+
+
+def render_external_intel_edit_form(records: pd.DataFrame) -> None:
+    st.markdown("**编辑记录**")
+    if records.empty:
+        st.caption("没有可编辑记录。")
+        return
+    options = build_external_intel_record_options(records)
+    selected_label = st.selectbox("选择 record_id", list(options.keys()), key="external_library_edit_record_id")
+    selected = options[selected_label]
+    record = records.loc[records["record_id"].astype(str).str.strip() == selected["record_id"]]
+    if record.empty:
+        st.warning("未找到选中的外部情报记录。")
+        return
+    row = record.iloc[0]
+    with st.form("external_intel_edit_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            platform = st.selectbox("平台", PLATFORM_OPTIONS, index=_option_index(PLATFORM_OPTIONS, row.get("platform"), "其他"), key="external_edit_platform")
+            title = st.text_input("标题", value=str(row.get("title", "") or ""), key="external_edit_title")
+            author_or_channel = st.text_input("作者/频道", value=str(row.get("author_or_channel", "") or ""), key="external_edit_author")
+            published_at = st.text_input("发布时间", value=str(row.get("published_at", "") or ""), key="external_edit_published_at")
+            evidence_type = st.selectbox("证据类型", EVIDENCE_TYPE_OPTIONS, index=_option_index(EVIDENCE_TYPE_OPTIONS, row.get("evidence_type"), "其他"), key="external_edit_evidence_type")
+        with col2:
+            views = st.text_input("播放/阅读量", value=str(row.get("views", "") or ""), key="external_edit_views")
+            comments = st.text_input("评论数", value=str(row.get("comments", "") or ""), key="external_edit_comments")
+            likes = st.text_input("点赞数", value=str(row.get("likes", "") or ""), key="external_edit_likes")
+            followers_or_members = st.text_input("粉丝/成员数", value=str(row.get("followers_or_members", "") or ""), key="external_edit_followers")
+            sentiment = st.selectbox("情绪", SENTIMENT_OPTIONS, index=_option_index(SENTIMENT_OPTIONS, row.get("sentiment"), "未判断"), key="external_edit_sentiment")
+            relevance = st.selectbox("相关度", RELEVANCE_OPTIONS, index=_option_index(RELEVANCE_OPTIONS, row.get("relevance"), "中"), key="external_edit_relevance")
+        key_takeaway = st.text_area("关键结论", value=str(row.get("key_takeaway", "") or ""), height=80, key="external_edit_key_takeaway")
+        note = st.text_area("备注", value=str(row.get("note", "") or ""), height=80, key="external_edit_note")
+        save_edit = st.form_submit_button("保存修改")
+
+    if save_edit:
+        updates = {
+            "platform": platform,
+            "title": title,
+            "author_or_channel": author_or_channel,
+            "published_at": published_at,
+            "views": views,
+            "comments": comments,
+            "likes": likes,
+            "followers_or_members": followers_or_members,
+            "evidence_type": evidence_type,
+            "sentiment": sentiment,
+            "relevance": relevance,
+            "key_takeaway": key_takeaway,
+            "note": note,
+        }
+        try:
+            success = update_external_intel_record(EXTERNAL_INTEL_CSV_PATH, selected["record_id"], updates)
+        except Exception as exc:
+            st.error(f"保存修改失败：{exc}")
+            return
+        if success:
+            st.success("外部情报记录已更新。")
+        else:
+            st.warning("未找到对应记录，未保存修改。")
+
+
+def render_external_intel_delete_form(records: pd.DataFrame) -> None:
+    st.markdown("**删除记录**")
+    if records.empty:
+        st.caption("没有可删除记录。")
+        return
+    options = build_external_intel_record_options(records)
+    selected_label = st.selectbox("选择要删除的 record_id", list(options.keys()), key="external_library_delete_record_id")
+    selected = options[selected_label]
+    confirm = st.checkbox("我确认删除这条外部情报", key="external_library_delete_confirm")
+    if st.button("删除选中记录", key="external_library_delete_button"):
+        if not confirm:
+            st.warning("请先勾选二次确认。")
+            return
+        try:
+            deleted_count = delete_external_intel_records(EXTERNAL_INTEL_CSV_PATH, [selected["record_id"]])
+        except Exception as exc:
+            st.error(f"删除失败：{exc}")
+            return
+        if deleted_count:
+            st.success("外部情报记录已删除。")
+        else:
+            st.warning("未找到对应记录，未删除。")
+
+
+def render_external_intel_dedupe_tools(all_records: pd.DataFrame) -> None:
+    st.markdown("**去重**")
+    if st.button("扫描疑似重复", key="external_library_scan_duplicates"):
+        st.session_state["external_intel_duplicates"] = find_duplicate_external_intel(all_records)
+    duplicates = st.session_state.get("external_intel_duplicates")
+    if not isinstance(duplicates, pd.DataFrame):
+        return
+    if duplicates.empty:
+        st.info("未发现疑似重复记录。")
+        return
+    display_columns = ["duplicate_rule", "created_at", "appid", "game_name", "platform", "title", "source_url", "record_id", "keep_record_id"]
+    st.dataframe(duplicates.loc[:, display_columns], use_container_width=True, hide_index=True)
+    delete_ids = duplicate_record_ids_to_delete(duplicates)
+    st.caption(f"将删除 {len(delete_ids)} 条重复记录，只保留每组最早 created_at 的一条。")
+    confirm = st.checkbox("我确认删除重复项，只保留最早记录", key="external_library_dedupe_confirm")
+    if st.button("删除重复项，只保留最早 created_at 的一条", key="external_library_delete_duplicates"):
+        if not confirm:
+            st.warning("请先勾选二次确认。")
+            return
+        try:
+            deleted_count = delete_external_intel_records(EXTERNAL_INTEL_CSV_PATH, delete_ids)
+        except Exception as exc:
+            st.error(f"删除重复项失败：{exc}")
+            return
+        st.success(f"已删除 {deleted_count} 条重复记录。")
+        st.session_state["external_intel_duplicates"] = find_duplicate_external_intel(load_external_intel(EXTERNAL_INTEL_CSV_PATH))
+
+
+def build_external_intel_record_options(records: pd.DataFrame) -> dict:
+    options = {}
+    for _, row in records.iterrows():
+        record_id = str(row.get("record_id", "") or "").strip()
+        if not record_id:
+            continue
+        title = str(row.get("title", "") or "").strip() or "未填写标题"
+        platform = str(row.get("platform", "") or "").strip() or "未填写平台"
+        label = f"{platform} | {title[:40]} | {record_id}"
+        options[label] = {"record_id": record_id}
+    return options
+
+
+def _option_index(options: list[str], value, fallback: str) -> int:
+    clean = str(value or "").strip()
+    if clean in options:
+        return options.index(clean)
+    return options.index(fallback) if fallback in options else 0
+
+
+def sanitize_export_filename(value: str) -> str:
+    clean = re.sub(r'[<>:"/\\|?*\s]+', "_", str(value or "").strip())
+    clean = clean.strip("._")
+    return clean[:80] or "unknown"
+
+
+def find_external_intel_duplicate_note(record: ExternalIntelRecord) -> str:
+    source_url = str(record.source_url or "").strip().casefold()
+    if not source_url:
+        return ""
+    records = load_external_intel(EXTERNAL_INTEL_CSV_PATH)
+    if records.empty:
+        return ""
+    same_url = records["source_url"].astype(str).str.strip().str.casefold().eq(source_url)
+    appid = str(record.appid or "").strip()
+    if appid and (same_url & records["appid"].astype(str).str.strip().eq(appid)).any():
+        return "疑似重复：已有相同 AppID + source_url 的外部情报记录。"
+    game_name = " ".join(str(record.game_name or "").split()).casefold()
+    if game_name:
+        names = records["game_name"].astype(str).map(lambda value: " ".join(value.split()).casefold())
+        if (same_url & names.eq(game_name)).any():
+            return "疑似重复：已有相同游戏名 + source_url 的外部情报记录。"
+    return ""
+
+
+def _external_display(value) -> str:
+    text = str(value or "").strip()
+    return text if text else "未填写"
+
+
+def _external_count_display(value) -> str:
+    clean = _external_display(value)
+    if clean == "未填写":
+        return clean
+    parsed = parse_count(clean)
+    return format_count(parsed) if parsed else clean
+
+
+def _external_display_source_value(value) -> str:
+    text = str(value or "").strip()
+    return "" if text in {"", PLACEHOLDER, "未获取", "未确认"} else text
+
+
+def _clean_external_form_value(value) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _markdown_table_cell(value: str) -> str:
+    return str(value or "未填写").replace("|", "\\|").replace("\n", " ")
 
 
 def render_profile_steam_competitors(profile: ProjectProfile) -> None:
@@ -882,11 +1379,11 @@ def render_profile_actions(profile: ProjectProfile) -> None:
             save_profile_as_project(profile, allow_duplicate=False)
     with col2:
         if st.button("生成 Markdown 画像报告", key="profile_export_md"):
-            markdown_path, _ = save_profile_reports(profile, PROFILE_REPORT_DIR)
+            markdown_path, _ = save_profile_reports(profile, PROFILE_REPORT_DIR, EXTERNAL_INTEL_CSV_PATH)
             st.success(f"Markdown 画像报告已生成：{markdown_path}")
     with col3:
         if st.button("生成 txt 画像报告", key="profile_export_txt"):
-            _, txt_path = save_profile_reports(profile, PROFILE_REPORT_DIR)
+            _, txt_path = save_profile_reports(profile, PROFILE_REPORT_DIR, EXTERNAL_INTEL_CSV_PATH)
             st.success(f"TXT 画像报告已生成：{txt_path}")
 
     duplicate_appid = st.session_state.get("profile_pending_duplicate_appid", "")
@@ -905,7 +1402,12 @@ def render_profile_actions(profile: ProjectProfile) -> None:
             send_profile_to_candidate_finder(profile)
 
     with st.expander("预览 Markdown 画像报告", expanded=False):
-        st.code(profile_to_markdown(profile), language="markdown")
+        external_records = filter_external_intel(
+            load_external_intel(EXTERNAL_INTEL_CSV_PATH),
+            appid=profile.basic_info.get("AppID", ""),
+            game_name=profile.basic_info.get("游戏名", ""),
+        )
+        st.code(profile_to_markdown(profile, external_records), language="markdown")
 
 
 def save_profile_as_project(profile: ProjectProfile, allow_duplicate: bool = False) -> None:
@@ -1183,7 +1685,7 @@ def render_demo_review_page() -> None:
                 key="performance_issue",
             )
 
-        with st.expander("发行判断", expanded=False):
+        with st.expander("项目初筛", expanded=False):
             core_loop_clarity = st.selectbox(
                 "核心循环是否清晰",
                 ["未判断", "清晰", "部分清晰", "不清晰"],
@@ -2182,8 +2684,10 @@ def render_home_dashboard_page() -> None:
     candidates = load_candidates(CANDIDATE_CSV_PATH)
     pending_projects = filter_pending_projects(active_projects)
     header_col1, header_col2, header_col3, header_col4, header_col5 = st.columns([2, 1, 1, 1, 1])
+    loaded_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    st.session_state["home_last_loaded_at"] = loaded_at
     with header_col1:
-        st.caption(f"最后刷新时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        st.caption(f"最后读取时间：{loaded_at}")
     with header_col2:
         force_refresh = st.button("刷新 Steam 图文源", key="home_steam_feed_refresh", use_container_width=True)
     with header_col3:
@@ -2224,6 +2728,7 @@ def render_home_dashboard_page() -> None:
 
     render_home_snapshot_manager(snapshots)
     render_home_daily_watch_history(daily_notes)
+    render_home_data_health_check(steam_feed)
     render_home_debug_expander(feed, steam_feed)
 
 
@@ -2342,35 +2847,126 @@ def render_home_steam_store_discovery(
 
 
 def render_home_quick_steam_search() -> None:
-    st.markdown("### Steam 快速搜索")
-    st.info("首页快速搜索暂未启用")
+    if st.session_state.get("home_direct_lookup_clear_requested"):
+        st.session_state["home_direct_lookup_input"] = ""
+        st.session_state["home_direct_lookup_result"] = {}
+        st.session_state["home_direct_lookup_message"] = ""
+        st.session_state["home_direct_lookup_debug"] = {}
+        st.session_state["home_direct_lookup_clear_requested"] = False
+
+    st.markdown("### Steam 直查")
+    st.caption("输入 AppID、Steam 链接或 SteamDB 链接，快速生成项目卡。")
+    input_col, submit_col, clear_col = st.columns([4, 1, 1])
+    with input_col:
+        raw_input = st.text_input(
+            "AppID / Steam 链接 / SteamDB app 链接",
+            key="home_direct_lookup_input",
+            placeholder="2679100 或 https://store.steampowered.com/app/2679100/Witchspire/",
+        )
+    with submit_col:
+        st.write("")
+        do_lookup = st.button("查询", key="home_direct_lookup_submit", use_container_width=True)
+    with clear_col:
+        st.write("")
+        do_clear = st.button("清空", key="home_direct_lookup_clear", use_container_width=True)
+
+    if do_clear:
+        st.session_state["home_direct_lookup_clear_requested"] = True
+        st.rerun()
+
+    if do_lookup:
+        result, debug = run_home_direct_lookup(raw_input)
+        st.session_state["home_direct_lookup_result"] = result
+        st.session_state["home_direct_lookup_debug"] = debug
+        st.session_state["home_direct_lookup_message"] = debug.get("message", "")
+
+    message = st.session_state.get("home_direct_lookup_message", "")
+    if message:
+        if st.session_state.get("home_direct_lookup_debug", {}).get("direct_lookup_error"):
+            st.warning(message)
+        else:
+            st.success(message)
+
+    result = st.session_state.get("home_direct_lookup_result", {})
+    if isinstance(result, dict) and result:
+        render_home_direct_lookup_card(result)
 
 
-def run_home_quick_steam_search(query: str, status_filter: str, ignore_cache: bool) -> tuple[list[dict], dict]:
-    clean_query = " ".join(str(query or "").split())
-    return [], {
-        "search_query": clean_query,
-        "search_status_filter": status_filter,
-        "search_cache_hit": False,
-        "search_result_count": 0,
-        "search_error": "",
-        "message": "首页快速搜索暂未启用",
+def run_home_direct_lookup(raw_input: str) -> tuple[dict, dict]:
+    clean_input = str(raw_input or "").strip()
+    appid = parse_appid(clean_input)
+    debug = {
+        "direct_lookup_input": clean_input,
+        "direct_lookup_appid": appid,
+        "direct_lookup_status": "pending",
+        "direct_lookup_error": "",
+        "direct_lookup_appdetails_status": "",
+        "message": "",
     }
+    if not appid:
+        debug["direct_lookup_status"] = "failed"
+        debug["direct_lookup_error"] = "appid_not_found"
+        debug["message"] = "未识别到 AppID，请输入 Steam AppID、Steam app 链接或 SteamDB app 链接。"
+        return {}, debug
+
+    cards = build_home_quick_appid_result_cards(appid, raw_input=clean_input)
+    card = cards[0] if cards else {}
+    debug["direct_lookup_status"] = "success" if card else "failed"
+    debug["direct_lookup_appdetails_status"] = str(card.get("appdetails_status") or card.get("detail_fetch_status") or "")
+    debug["message"] = "查询完成。" if card else "未获取到 appdetails 数据。"
+    return card, debug
 
 
-def build_home_quick_appid_result_cards(appid: str) -> list[dict]:
+def render_home_direct_lookup_card(card: dict) -> None:
+    with st.container(border=True):
+        image_url = resolve_home_card_image(card)
+        if image_url:
+            st.image(image_url, use_container_width=True)
+        st.markdown(f"**{card.get('game_name') or card.get('title') or '未命名项目'}**")
+        st.caption(f"AppID：{card.get('appid') or '未获取'}")
+        st.caption(f"开发商：{compact_card_value(card.get('developer'))}")
+        st.caption(f"发行商：{compact_card_value(card.get('publisher'))}")
+        st.caption(f"发售日期：{compact_card_value(card.get('release_date'))}")
+        st.caption(f"类型：{compact_genres_for_direct_lookup(card.get('genres'))}")
+        st.caption(f"价格：{compact_card_value(card.get('price'))}")
+        st.caption(f"简中：{card.get('supports_schinese') or '未确认'} · Demo：{card.get('has_demo') or '未确认'}")
+        st.caption(f"appdetails_status：{card.get('appdetails_status') or card.get('detail_fetch_status') or '未获取'}")
+
+        link_col1, link_col2, profile_col, clear_col = st.columns(4)
+        with link_col1:
+            if card.get("steam_url"):
+                st.link_button("打开 Steam", card["steam_url"], use_container_width=True)
+        with link_col2:
+            if card.get("steamdb_url"):
+                st.link_button("打开 SteamDB", card["steamdb_url"], use_container_width=True)
+        with profile_col:
+            if st.button("发送到项目画像", key=f"home_direct_lookup_profile_{card.get('appid')}", use_container_width=True):
+                send_home_direct_lookup_to_profile(card)
+        with clear_col:
+            if st.button("清空结果", key=f"home_direct_lookup_card_clear_{card.get('appid')}", use_container_width=True):
+                st.session_state["home_direct_lookup_clear_requested"] = True
+                st.rerun()
+
+
+def send_home_direct_lookup_to_profile(card: dict) -> None:
+    set_profile_prefill_from_mapping(card, source_context="Steam 直查")
+    st.success("已发送到【一键项目画像】，请打开对应 Tab。")
+
+
+def build_home_quick_appid_result_cards(appid: str, raw_input: str = "") -> list[dict]:
     clean_appid = str(appid or "").strip()
     if not clean_appid:
         return []
+    input_slug = extract_steam_input_slug(raw_input)
     base_card = {
         "card_type": "steam_store",
         "record_id": clean_appid,
-        "title": f"AppID {clean_appid}",
+        "title": input_slug or f"AppID {clean_appid}",
         "subtitle": "AppID 直查",
-        "game_name": f"AppID {clean_appid}",
+        "game_name": input_slug or f"AppID {clean_appid}",
         "appid": clean_appid,
         "source": "AppID 直查",
-        "source_group": "Steam 搜索",
+        "source_group": "Steam 直查",
         "source_filter": "appid_lookup",
         "search_source_filter": "appid_lookup",
         "source_url": steam_url_from_appid(clean_appid),
@@ -2392,24 +2988,19 @@ def build_home_quick_appid_result_cards(appid: str) -> list[dict]:
     return enrich_steam_store_cards([base_card], limit=1)
 
 
-def filter_home_quick_search_cards_by_status(cards: list[dict], status_filter: str) -> list[dict]:
-    if status_filter == "全部":
-        return cards
-    return [card for card in cards if home_quick_release_status(card) == status_filter]
+def extract_steam_input_slug(raw_input: str) -> str:
+    match = re.search(r"store\.steampowered\.com/app/\d+/([^/?#]+)", str(raw_input or ""), flags=re.I)
+    if not match:
+        return ""
+    return match.group(1).strip().replace("_", " ")
 
 
-def home_quick_release_status(card: dict) -> str:
-    coming_soon = card.get("release_coming_soon")
-    if coming_soon is True:
-        return "未发售 / 即将推出"
-    if coming_soon is False:
-        release_date = parse_steam_release_date(card.get("release_date", ""))
-        if release_date:
-            return "未发售 / 即将推出" if release_date > datetime.now().date() else "已发售"
-    release_date = parse_steam_release_date(card.get("release_date", "") or card.get("raw_release_date", ""))
-    if release_date:
-        return "未发售 / 即将推出" if release_date > datetime.now().date() else "已发售"
-    return "未确认"
+def compact_genres_for_direct_lookup(value) -> str:
+    text = compact_card_value(value, max_len=80)
+    if text == "未获取":
+        return text
+    parts = [part.strip() for part in re.split(r"[,/，、]+", text) if part.strip()]
+    return " / ".join(parts[:3]) if parts else text
 
 
 def render_current_appdetails_debug_controls(visible_cards: list[dict]) -> None:
@@ -2490,7 +3081,8 @@ def collect_manual_observation_cards(snapshots: pd.DataFrame, daily_notes: pd.Da
                     seen.add(key)
                     cards.append(card)
     if not daily_notes.empty:
-        for _, row in daily_notes.tail(8).iloc[::-1].iterrows():
+        sorted_notes = sort_records_by_created_at(daily_notes)
+        for _, row in sorted_notes.head(8).iterrows():
             game_name = str(row.get("game_name", "")).strip()
             appid = str(row.get("appid", "")).strip()
             key = appid or game_name.casefold()
@@ -2585,6 +3177,7 @@ def merge_appdetails_into_home_card(card: dict, detail: dict) -> dict:
         review_stats={},
     )
     merged.update(normalized)
+    merged = apply_home_card_core_field_priority(merged, card, detail, normalized)
     merged["title"] = normalized.get("game_name") or merged.get("title") or merged.get("game_name")
     merged["tags"] = detail.get("tags_text") or merged.get("tags") or "未获取"
     merged["steam_page_date"] = detail.get("steam_page_date") or "未获取"
@@ -2608,6 +3201,62 @@ def merge_appdetails_into_home_card(card: dict, detail: dict) -> dict:
         merged["field_merge_anomaly"] = "字段合并异常：appdetails 有值但卡片未使用"
         merged["field_merge_anomaly_fields"] = " / ".join(anomalies)
     return merged
+
+
+def apply_home_card_core_field_priority(merged: dict, original: dict, detail: dict, normalized: dict) -> dict:
+    output = dict(merged)
+    detail_values = {
+        "game_name": detail.get("name"),
+        "developer": detail.get("developer") or _join_home_card_list(detail.get("developers")),
+        "publisher": detail.get("publisher") or _join_home_card_list(detail.get("publishers")),
+        "release_date": detail.get("release_date"),
+        "genres": detail.get("genres_text") or _join_home_card_list(detail.get("genres")),
+        "categories": detail.get("categories_text") or _join_home_card_list(detail.get("categories")),
+        "price": detail.get("price"),
+        "supports_schinese": detail.get("supports_schinese"),
+        "has_demo": detail.get("has_demo"),
+        "image_url": detail.get("header_image") or detail.get("capsule_image"),
+    }
+    fallback_by_field = {
+        "game_name": "未命名项目",
+        "developer": "未获取",
+        "publisher": "未获取",
+        "release_date": "未获取",
+        "genres": "未获取",
+        "categories": "未获取",
+        "price": "未获取",
+        "supports_schinese": "未确认",
+        "has_demo": "未确认",
+        "image_url": "",
+    }
+    for field_name, fallback in fallback_by_field.items():
+        output[field_name] = first_home_card_value(
+            detail_values.get(field_name),
+            normalized.get(field_name),
+            original.get(field_name),
+            output.get(field_name),
+            fallback=fallback,
+        )
+    if output.get("game_name") and not is_missing_card_value(output.get("game_name")):
+        output["title"] = output.get("game_name")
+    return output
+
+
+def first_home_card_value(*values, fallback: str = "未获取") -> str:
+    for value in values:
+        if isinstance(value, list):
+            text = _join_home_card_list(value)
+        else:
+            text = str(value or "").strip()
+        if not is_missing_card_value(text):
+            return text
+    return fallback
+
+
+def _join_home_card_list(value) -> str:
+    if isinstance(value, list):
+        return " / ".join(str(item).strip() for item in value if str(item).strip())
+    return str(value or "").strip()
 
 
 def resolve_home_card_data_source(card: dict, detail: dict, normalized: dict) -> str:
@@ -3140,7 +3789,8 @@ def collect_home_discovery_items(
     if not daily_notes.empty:
         today_prefix = datetime.now().strftime("%Y-%m-%d")
         today_notes = daily_notes.loc[daily_notes["created_at"].astype(str).str.startswith(today_prefix)].copy()
-        for _, row in today_notes.tail(10).iloc[::-1].iterrows():
+        today_notes = sort_records_by_created_at(today_notes)
+        for _, row in today_notes.head(10).iterrows():
             game_name = str(row.get("game_name", "")).strip()
             appid = str(row.get("appid", "")).strip()
             key = appid or game_name.casefold()
@@ -3555,10 +4205,13 @@ def send_home_card_to_profile(card: dict) -> None:
             "appid": str(normalized.get("appid") or card.get("appid", "")),
             "source_url": str(card.get("source_url", "") or card.get("steamdb_url", "")),
             "steam_url": str(normalized.get("steam_url") or card.get("steam_url", "")),
+            "steamdb_url": str(card.get("steamdb_url", "")),
+            "image_url": str(normalized.get("image_url") or card.get("image_url", "")),
             "note": str(card.get("note", "") or card.get("subtitle", "")),
             "developer": str(normalized.get("developer", "")),
             "publisher": str(normalized.get("publisher", "")),
             "genres": str(normalized.get("genres", "")),
+            "categories": str(normalized.get("categories", "") or card.get("categories", "")),
             "release_date": str(normalized.get("release_date", "")),
             "price": str(normalized.get("price", "")),
             "supports_schinese": str(normalized.get("supports_schinese", "")),
@@ -3572,6 +4225,7 @@ def send_home_card_to_profile(card: dict) -> None:
             "avg_playtime_hours": str(normalized.get("avg_playtime_hours", "")),
             "review_stats_status": str(normalized.get("review_stats_status", "")),
             "source_group": str(card.get("source_group", "")),
+            "source_context": str(card.get("source_group", "") or card.get("source", "") or "首页卡片"),
         }
     )
     send_daily_watch_to_profile(row)
@@ -3843,6 +4497,7 @@ def render_home_quick_actions() -> None:
             STEAM_HOME_FEED_CACHE_PATH,
             STEAM_APPDETAILS_CACHE_PATH,
             STEAM_REVIEW_STATS_CACHE_PATH,
+            EXTERNAL_INTEL_CSV_PATH,
         )
         st.success(f"Excel 已导出：{excel_path}")
 
@@ -3897,7 +4552,7 @@ def render_home_steam_news_links() -> None:
 
 def render_home_recent_projects(active_projects: pd.DataFrame) -> None:
     st.markdown("### 最近项目与待办")
-    recent_projects = active_projects.tail(10).copy()
+    recent_projects = sort_records_by_created_at(active_projects).head(10)
     display_columns = [
         "created_at",
         "game_name",
@@ -3912,7 +4567,7 @@ def render_home_recent_projects(active_projects: pd.DataFrame) -> None:
         st.info("暂无最近项目。")
         return
 
-    compact = build_home_project_display(recent_projects.tail(5), display_columns)
+    compact = build_home_project_display(recent_projects.head(5), display_columns)
     st.dataframe(compact, use_container_width=True, hide_index=True)
 
     with st.expander("查看完整最近项目", expanded=False):
@@ -3934,15 +4589,16 @@ def render_home_pending_projects(pending_projects: pd.DataFrame) -> None:
     if pending_projects.empty:
         st.info("暂无待处理项目。")
         return
+    pending_projects = sort_records_by_created_at(pending_projects)
 
     st.dataframe(
-        build_home_project_display(pending_projects.tail(5), display_columns),
+        build_home_project_display(pending_projects.head(5), display_columns),
         use_container_width=True,
         hide_index=True,
     )
     with st.expander("查看完整待处理项目", expanded=False):
         st.dataframe(
-            build_home_project_display(pending_projects.tail(10), display_columns),
+            build_home_project_display(pending_projects.head(10), display_columns),
             use_container_width=True,
             hide_index=True,
         )
@@ -4047,6 +4703,12 @@ def render_home_daily_watch_form() -> None:
 
 def render_home_snapshot_manager(snapshots: pd.DataFrame) -> None:
     with st.expander("管理首页快照", expanded=False):
+        st.caption("首页快照：某一时刻首页发现流或人工入口保存下来的项目快照，不等同于今日观察历史。")
+        if st.button("刷新首页快照列表", key="snapshot_manager_refresh"):
+            st.session_state["snapshot_manager_last_loaded_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            st.rerun()
+        if st.session_state.get("snapshot_manager_last_loaded_at"):
+            st.caption(f"快照列表最后读取时间：{st.session_state['snapshot_manager_last_loaded_at']}")
         current_snapshots = load_home_snapshots(HOME_SNAPSHOT_CSV_PATH)
         if current_snapshots.empty:
             st.info("暂无首页快照。")
@@ -4136,10 +4798,34 @@ def render_home_snapshot_manager(snapshots: pd.DataFrame) -> None:
 
 def render_home_daily_watch_history(daily_notes: pd.DataFrame) -> None:
     with st.expander("查看今日观察历史", expanded=False):
-        if daily_notes.empty:
+        st.caption("今日观察历史：用户手动观察过的项目记录；默认按创建时间倒序显示最近 10 条。")
+        col_refresh, col_clear = st.columns([1, 2])
+        with col_refresh:
+            if st.button("刷新今日观察历史", key="daily_watch_history_refresh", use_container_width=True):
+                st.session_state["daily_watch_last_loaded_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                st.rerun()
+        with col_clear:
+            confirm_clear = st.checkbox("我确认清空今日观察历史", key="daily_watch_clear_confirm")
+            if st.button("清空今日观察历史", key="daily_watch_clear_button", use_container_width=True):
+                if not confirm_clear:
+                    st.warning("请先勾选二次确认。")
+                else:
+                    pd.DataFrame(columns=DAILY_WATCH_COLUMNS).to_csv(DAILY_WATCH_CSV_PATH, index=False, encoding="utf-8-sig")
+                    st.session_state["daily_watch_last_loaded_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    st.success("今日观察历史已清空。")
+                    st.rerun()
+
+        current_notes = sort_records_by_created_at(load_daily_watch_notes(DAILY_WATCH_CSV_PATH))
+        last_loaded_at = st.session_state.get("daily_watch_last_loaded_at") or st.session_state.get("home_last_loaded_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        st.caption(f"今日观察历史最后读取时间：{last_loaded_at}")
+        if current_notes.empty:
             st.info("暂无今日观察记录。")
             return
-        display = daily_notes.tail(30).rename(
+        newest_created_at = str(current_notes.iloc[0].get("created_at", "") or "未记录").strip()
+        st.caption(f"最新记录时间：{newest_created_at}")
+        show_more = st.checkbox("显示最近 30 条", value=False, key="daily_watch_history_show_more")
+        visible_notes = current_notes.head(30 if show_more else 10)
+        display = visible_notes.rename(
             columns={
                 "created_at": "创建时间",
                 "source": "来源",
@@ -4154,8 +4840,64 @@ def render_home_daily_watch_history(daily_notes: pd.DataFrame) -> None:
         st.dataframe(display, use_container_width=True, hide_index=True)
 
 
+def sort_records_by_created_at(records: pd.DataFrame) -> pd.DataFrame:
+    if records.empty or "created_at" not in records.columns:
+        return records.copy()
+    sorted_records = records.copy()
+    sorted_records["_created_at_sort"] = pd.to_datetime(sorted_records["created_at"], errors="coerce")
+    sorted_records = sorted_records.sort_values(by="_created_at_sort", ascending=False, na_position="last")
+    return sorted_records.drop(columns=["_created_at_sort"])
+
+
+def render_home_data_health_check(steam_feed: SteamStoreFeedResult) -> None:
+    with st.expander("数据健康检查", expanded=False):
+        daily_notes = load_daily_watch_notes(DAILY_WATCH_CSV_PATH)
+        snapshots = load_home_snapshots(HOME_SNAPSHOT_CSV_PATH)
+        external_records = load_external_intel(EXTERNAL_INTEL_CSV_PATH)
+        profile_prefill = st.session_state.get("profile_prefill_metadata", {})
+        if not isinstance(profile_prefill, dict):
+            profile_prefill = {}
+        direct_debug = st.session_state.get("home_direct_lookup_debug", {})
+        if not isinstance(direct_debug, dict):
+            direct_debug = {}
+        debug_detail = st.session_state.get("home_appdetails_debug_result", {})
+        if not isinstance(debug_detail, dict):
+            debug_detail = {}
+        current_appid = (
+            str(profile_prefill.get("appid", "") or "").strip()
+            or str(direct_debug.get("direct_lookup_appid", "") or "").strip()
+            or str(debug_detail.get("appid", "") or "").strip()
+        )
+        current_game_name = (
+            str(profile_prefill.get("game_name", "") or "").strip()
+            or str(debug_detail.get("name", "") or "").strip()
+        )
+        visible_stats = st.session_state.get("home_appdetails_visible_stats", {})
+        if not isinstance(visible_stats, dict):
+            visible_stats = {}
+        health_rows = [
+            {"字段": "当前 appid", "状态": current_appid or "暂无数据"},
+            {"字段": "当前 game_name", "状态": current_game_name or "暂无数据"},
+            {"字段": "首页缓存文件路径", "状态": str(STEAM_HOME_FEED_CACHE_PATH)},
+            {"字段": "今日观察记录数量", "状态": len(daily_notes)},
+            {"字段": "首页快照数量", "状态": len(snapshots)},
+            {"字段": "外部情报记录数量", "状态": len(external_records)},
+            {"字段": "appdetails_status", "状态": debug_detail.get("detail_fetch_status") or direct_debug.get("direct_lookup_appdetails_status") or "暂无数据"},
+            {"字段": "card_data_source", "状态": profile_prefill.get("source_context") or direct_debug.get("direct_lookup_status") or "暂无数据"},
+            {"字段": "last_loaded_at", "状态": st.session_state.get("home_last_loaded_at") or "暂无数据"},
+            {"字段": "last_error", "状态": "; ".join(steam_feed.errors[:3]) if steam_feed.errors else (steam_feed.message if (steam_feed.used_stale_cache or "失败" in str(steam_feed.message)) else "暂无")},
+        ]
+        st.dataframe(pd.DataFrame(health_rows), use_container_width=True, hide_index=True)
+        st.caption(
+            "appdetails 当前卡片："
+            f"成功 {visible_stats.get('success', 0)} / "
+            f"失败 {visible_stats.get('failed', 0)} / "
+            f"缺字段 {visible_stats.get('cache_missing_fields', 0)}"
+        )
+
+
 def render_home_debug_expander(feed: HomeFeedResult, steam_feed: SteamStoreFeedResult) -> None:
-    with st.expander("数据获取状态 / 调试信息", expanded=False):
+    with st.expander("详细调试 JSON", expanded=False):
         snapshots = load_home_snapshots(HOME_SNAPSHOT_CSV_PATH)
         steam_group_counts = {key: len(value) for key, value in steam_feed.groups.items()}
         appdetails_cache = load_cached_appdetails_summaries(STEAM_APPDETAILS_CACHE_PATH)
@@ -4167,6 +4909,7 @@ def render_home_debug_expander(feed: HomeFeedResult, steam_feed: SteamStoreFeedR
         visible_review_stats = st.session_state.get("home_review_stats_visible_stats", {})
         filter_debug = st.session_state.get("home_steam_filter_debug", {})
         search_debug = st.session_state.get("home_quick_search_debug", {})
+        direct_lookup_debug = st.session_state.get("home_direct_lookup_debug", {})
         st.caption(f"自动信息流缓存：{HOME_FEED_CACHE_PATH}")
         st.caption(f"Steam 图文源缓存：{STEAM_HOME_FEED_CACHE_PATH}")
         st.caption(f"Steam appdetails 详情缓存：{STEAM_APPDETAILS_CACHE_PATH}")
@@ -4188,6 +4931,11 @@ def render_home_debug_expander(feed: HomeFeedResult, steam_feed: SteamStoreFeedR
                 "search_cache_hit": search_debug.get("search_cache_hit", False),
                 "search_result_count": search_debug.get("search_result_count", 0),
                 "search_error": search_debug.get("search_error", ""),
+                "direct_lookup_input": direct_lookup_debug.get("direct_lookup_input", ""),
+                "direct_lookup_appid": direct_lookup_debug.get("direct_lookup_appid", ""),
+                "direct_lookup_status": direct_lookup_debug.get("direct_lookup_status", ""),
+                "direct_lookup_error": direct_lookup_debug.get("direct_lookup_error", ""),
+                "direct_lookup_appdetails_status": direct_lookup_debug.get("direct_lookup_appdetails_status", ""),
                 "appdetails_success_count": appdetails_success_count,
                 "appdetails_failure_count": appdetails_failure_count,
                 "appdetails_cache_entries": len(appdetails_cache),
@@ -4218,40 +4966,11 @@ def render_home_debug_expander(feed: HomeFeedResult, steam_feed: SteamStoreFeedR
 
 
 def send_daily_watch_to_profile(row: pd.Series) -> None:
-    appid = str(row.get("appid", "") or "").strip()
-    steam_url = str(row.get("steam_url", "") or "").strip()
-    source_url = str(row.get("source_url", "") or "").strip()
-    game_name = str(row.get("game_name", "") or "").strip()
-    developer = str(row.get("developer", "") or "").strip()
-    publisher = str(row.get("publisher", "") or "").strip()
-    genres = str(row.get("genres", "") or "").strip()
-    release_date = str(row.get("release_date", "") or "").strip()
-    price = str(row.get("price", "") or "").strip()
-    supports_schinese = str(row.get("supports_schinese", "") or "").strip()
-    has_demo = str(row.get("has_demo", "") or "").strip()
-    st.session_state["profile_steam_input"] = steam_url or steam_url_from_appid(appid) or source_url or appid
-    if game_name:
-        st.session_state["profile_chinese_name"] = game_name
-    st.session_state["profile_prefill_metadata"] = {
-        "appid": appid,
-        "game_name": game_name,
-        "steam_url": steam_url or steam_url_from_appid(appid) or source_url,
-        "developer": developer,
-        "publisher": publisher,
-        "genres": genres,
-        "release_date": release_date,
-        "price": price,
-        "supports_schinese": supports_schinese,
-        "has_demo": has_demo,
-        "review_total": str(row.get("review_total", "") or "").strip(),
-        "review_positive": str(row.get("review_positive", "") or "").strip(),
-        "review_negative": str(row.get("review_negative", "") or "").strip(),
-        "positive_rate": str(row.get("positive_rate", "") or "").strip(),
-        "review_score_desc": str(row.get("review_score_desc", "") or "").strip(),
-        "median_playtime_hours": str(row.get("median_playtime_hours", "") or "").strip(),
-        "avg_playtime_hours": str(row.get("avg_playtime_hours", "") or "").strip(),
-        "review_stats_status": str(row.get("review_stats_status", "") or "").strip(),
-    }
+    metadata = set_profile_prefill_from_mapping(row.to_dict(), source_context=str(row.get("source_context", "") or row.get("source", "") or "今日观察记录"))
+    developer = metadata.get("developer", "")
+    publisher = metadata.get("publisher", "")
+    genres = metadata.get("genres", "")
+    release_date = metadata.get("release_date", "")
     metadata_keywords = "\n".join(
         part
         for part in [
@@ -4266,6 +4985,54 @@ def send_daily_watch_to_profile(row: pd.Series) -> None:
         st.session_state["profile_user_keywords"] = metadata_keywords
     st.session_state["pending_home_target"] = "profile"
     st.rerun()
+
+
+def set_profile_prefill_from_mapping(data: dict, source_context: str = "") -> dict:
+    normalized = normalize_steam_game_data(
+        appid=str(data.get("appid", "") or ""),
+        search_item=data,
+        appdetails={},
+        review_stats=data,
+    )
+    appid = _clean_prefill_value(normalized.get("appid") or data.get("appid"))
+    steam_url = _clean_prefill_value(normalized.get("steam_url") or data.get("steam_url") or steam_url_from_appid(appid))
+    source_url = _clean_prefill_value(data.get("source_url"))
+    game_name = _clean_prefill_value(normalized.get("game_name") or data.get("game_name") or data.get("title"))
+    steamdb_url = _clean_prefill_value(data.get("steamdb_url") or steamdb_app_url_from_appid(appid))
+    metadata = {
+        "appid": appid,
+        "game_name": game_name,
+        "steam_url": steam_url or source_url or steam_url_from_appid(appid),
+        "steamdb_url": steamdb_url,
+        "image_url": _clean_prefill_value(normalized.get("image_url") or data.get("image_url")),
+        "developer": _clean_prefill_value(normalized.get("developer") or data.get("developer")),
+        "publisher": _clean_prefill_value(normalized.get("publisher") or data.get("publisher")),
+        "release_date": _clean_prefill_value(normalized.get("release_date") or data.get("release_date")),
+        "genres": _clean_prefill_value(normalized.get("genres") or data.get("genres")),
+        "categories": _clean_prefill_value(normalized.get("categories") or data.get("categories")),
+        "price": _clean_prefill_value(normalized.get("price") or data.get("price")),
+        "supports_schinese": _clean_prefill_value(normalized.get("supports_schinese") or data.get("supports_schinese")),
+        "has_demo": _clean_prefill_value(normalized.get("has_demo") or data.get("has_demo")),
+        "source_context": _clean_prefill_value(source_context or data.get("source_context") or data.get("source") or data.get("source_group")),
+        "review_total": _clean_prefill_value(data.get("review_total")),
+        "review_positive": _clean_prefill_value(data.get("review_positive")),
+        "review_negative": _clean_prefill_value(data.get("review_negative")),
+        "positive_rate": _clean_prefill_value(data.get("positive_rate")),
+        "review_score_desc": _clean_prefill_value(data.get("review_score_desc")),
+        "median_playtime_hours": _clean_prefill_value(data.get("median_playtime_hours")),
+        "avg_playtime_hours": _clean_prefill_value(data.get("avg_playtime_hours")),
+        "review_stats_status": _clean_prefill_value(data.get("review_stats_status")),
+    }
+    st.session_state["profile_steam_input"] = metadata["steam_url"] or source_url or appid
+    if game_name:
+        st.session_state["profile_chinese_name"] = game_name
+    st.session_state["profile_prefill_metadata"] = metadata
+    return metadata
+
+
+def _clean_prefill_value(value) -> str:
+    text = str(value or "").strip()
+    return "" if text in {"未获取", "未确认", "暂无", "None", "nan", "[]"} else text
 
 
 def send_daily_watch_to_search_center(row: pd.Series) -> None:
@@ -4611,12 +5378,7 @@ def render_steamdb_import_section() -> None:
 
 
 def send_steamdb_row_to_profile(row: pd.Series) -> None:
-    appid = str(row.get("appid", "") or "").strip()
-    steam_url = str(row.get("steam_url", "") or "").strip() or steam_url_from_appid(appid)
-    game_name = str(row.get("game_name", "") or "").strip()
-    st.session_state["profile_steam_input"] = steam_url or appid
-    if game_name:
-        st.session_state["profile_chinese_name"] = game_name
+    set_profile_prefill_from_mapping(row.to_dict(), source_context=str(row.get("source_page", "") or "SteamDB 观察"))
     st.success("已发送到一键项目画像。切换到该 Tab 后点击生成项目画像草稿。")
 
 
@@ -4716,6 +5478,7 @@ def render_history_records() -> None:
                 STEAM_HOME_FEED_CACHE_PATH,
                 STEAM_APPDETAILS_CACHE_PATH,
                 STEAM_REVIEW_STATS_CACHE_PATH,
+                EXTERNAL_INTEL_CSV_PATH,
             )
             st.success(f"Excel 已导出：{excel_path}")
 
@@ -4746,7 +5509,7 @@ def render_docs_status_page() -> None:
     st.markdown(
         """
 - 当前版本：V0.6.0 Steam 日常雷达
-- 数据文件：`data/projects.csv`、`data/competitors.csv`、`data/competitor_candidates.csv`、`data/steamdb_watch_notes.csv`、`data/steamdb_link_templates.csv`、`data/daily_watch_notes.csv`、`data/home_snapshots.csv`、`data/cache/steam_home_feed_cache.json`、`data/cache/steam_appdetails_cache.json`、`data/cache/steam_review_stats_cache.json`、`data/cache/home_feed_cache.json`、`data/cache/steam_images_cache.json`
+- 数据文件：`data/projects.csv`、`data/competitors.csv`、`data/competitor_candidates.csv`、`data/external_intel.csv`、`data/steamdb_watch_notes.csv`、`data/steamdb_link_templates.csv`、`data/daily_watch_notes.csv`、`data/home_snapshots.csv`、`data/cache/steam_home_feed_cache.json`、`data/cache/steam_appdetails_cache.json`、`data/cache/steam_review_stats_cache.json`、`data/cache/home_feed_cache.json`、`data/cache/steam_images_cache.json`
 - 图片目录：`data/snapshots/`
 - 报告目录：`reports/markdown/`、`reports/txt/`、`reports/excel/`、`reports/profile/`
 - 搜索中心导出目录：`exports/`
@@ -4764,6 +5527,7 @@ def main() -> None:
     ensure_watch_note_csv_exists(STEAMDB_WATCH_NOTE_CSV_PATH)
     ensure_daily_watch_csv_exists(DAILY_WATCH_CSV_PATH)
     ensure_home_snapshot_csv_exists(HOME_SNAPSHOT_CSV_PATH)
+    ensure_external_intel_csv_exists(EXTERNAL_INTEL_CSV_PATH)
     HOME_SNAPSHOT_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 
     st.set_page_config(page_title="Steam 项目初筛助手", layout="wide")

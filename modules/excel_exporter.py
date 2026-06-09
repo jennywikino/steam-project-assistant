@@ -16,6 +16,12 @@ from modules.competitor_compare import (
     load_competitors,
 )
 from modules.daily_watch import DAILY_WATCH_FIELD_LABELS, load_daily_watch_notes
+from modules.external_intel import (
+    EXTERNAL_INTEL_COLUMNS,
+    EXTERNAL_INTEL_FIELD_DESCRIPTIONS,
+    EXTERNAL_INTEL_FIELD_LABELS,
+    load_external_intel,
+)
 from modules.home_snapshots import (
     HOME_SNAPSHOT_EXPORT_COLUMNS,
     HOME_SNAPSHOT_FIELD_LABELS,
@@ -122,6 +128,7 @@ def build_field_description_data() -> pd.DataFrame:
     )
     rows.extend(_build_description_rows("home_snapshots.csv", HOME_SNAPSHOT_EXPORT_COLUMNS, HOME_SNAPSHOT_FIELD_LABELS, {}))
     rows.extend(_build_description_rows("steam_home_feed_cache.json", STEAM_HOME_FEED_EXPORT_COLUMNS, STEAM_HOME_FEED_FIELD_LABELS, {}))
+    rows.extend(_build_description_rows("external_intel.csv", EXTERNAL_INTEL_COLUMNS, EXTERNAL_INTEL_FIELD_LABELS, EXTERNAL_INTEL_FIELD_DESCRIPTIONS))
     return pd.DataFrame(rows)
 
 
@@ -189,6 +196,7 @@ def export_projects_to_excel(
     steam_home_feed_cache_path: Path | None = None,
     steam_appdetails_cache_path: Path | None = None,
     steam_review_stats_cache_path: Path | None = None,
+    external_intel_csv_path: Path | None = None,
 ) -> Path:
     """把原始 CSV 导出为中文可读 Excel。"""
     excel_path.parent.mkdir(parents=True, exist_ok=True)
@@ -287,6 +295,12 @@ def export_projects_to_excel(
         steam_home_feed = steam_home_feed.loc[:, STEAM_HOME_FEED_EXPORT_COLUMNS].copy()
     readable_steam_home_feed = steam_home_feed.rename(columns=STEAM_HOME_FEED_FIELD_LABELS)
 
+    if external_intel_csv_path is None:
+        external_intel = pd.DataFrame(columns=EXTERNAL_INTEL_COLUMNS)
+    else:
+        external_intel = load_external_intel(external_intel_csv_path)
+    readable_external_intel = external_intel.rename(columns=EXTERNAL_INTEL_FIELD_LABELS)
+
     field_descriptions = build_field_description_data()
 
     with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
@@ -299,6 +313,7 @@ def export_projects_to_excel(
         readable_daily_watch_notes.to_excel(writer, sheet_name="今日观察", index=False)
         readable_home_snapshots.to_excel(writer, sheet_name="首页快照", index=False)
         readable_steam_home_feed.to_excel(writer, sheet_name="首页Steam图文源", index=False)
+        readable_external_intel.to_excel(writer, sheet_name="外部情报", index=False)
         field_descriptions.to_excel(writer, sheet_name="字段说明", index=False)
 
         for sheet_name in [
@@ -311,6 +326,7 @@ def export_projects_to_excel(
             "今日观察",
             "首页快照",
             "首页Steam图文源",
+            "外部情报",
             "字段说明",
         ]:
             apply_sheet_style(writer.book[sheet_name])
