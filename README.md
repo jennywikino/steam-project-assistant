@@ -160,3 +160,9 @@ logs/streamlit.log
 - V0.5 接入已有 Steam 评论分析工具
 - V0.6 正式评测报告生成
 - V1.0 再考虑打包 exe 或便携包
+
+## 本地验收
+
+1. 先启动工具。
+2. 双击 `运行本地验收.bat`。
+3. 查看 `debug/smoke_home.png` 和命令行结果。

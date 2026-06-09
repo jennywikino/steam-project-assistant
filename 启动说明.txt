@@ -7,3 +7,4 @@
 如果下次打不开，先运行 停止工具.bat，再重新启动。
 
 旧启动脚本已归档到 tools/legacy_launchers/。
+如果 playwright install chromium 下载失败，验收脚本会尝试使用本机 Chrome / Edge。
