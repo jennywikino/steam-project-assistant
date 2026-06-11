@@ -71,6 +71,7 @@ PLATFORM_OPTIONS = [
     "官网",
     "Presskit",
     "媒体文章",
+    "Indienova",
     "其他",
 ]
 
@@ -82,6 +83,7 @@ EVIDENCE_TYPE_OPTIONS = [
     "社群",
     "开发者资料",
     "Presskit",
+    "链接",
     "其他",
 ]
 

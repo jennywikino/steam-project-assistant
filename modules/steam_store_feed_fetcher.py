@@ -106,6 +106,8 @@ def search_steam_store_items(
     status_filter: str = "全部",
     force_refresh: bool = False,
     count: int = 12,
+    country: str = "CN",
+    language: str = "schinese",
 ) -> SteamStoreSearchResult:
     clean_query = " ".join(str(query or "").split())
     clean_status = str(status_filter or "全部").strip() or "全部"
@@ -113,14 +115,16 @@ def search_steam_store_items(
         return SteamStoreSearchResult(query=clean_query, status_filter=clean_status, success=False, message="请输入搜索关键词。")
 
     cache = _load_cache(cache_path)
-    cache_key = _search_cache_key(clean_query, clean_status)
+    clean_country = str(country or "CN").strip() or "CN"
+    clean_language = str(language or "schinese").strip() or "schinese"
+    cache_key = _search_cache_key(clean_query, clean_status, clean_country, clean_language)
     entry = cache.get("queries", {}).get(cache_key, {}) if isinstance(cache.get("queries"), dict) else {}
     if entry and not force_refresh and _cache_is_fresh(entry):
         return _search_result_from_cache_entry(clean_query, clean_status, entry, from_cache=True, used_stale_cache=False, message="搜索结果来自缓存。")
 
     fetched_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
-        payload = _fetch_search_results("", count=count, term=clean_query)
+        payload = _fetch_search_results("", count=count, term=clean_query, country=clean_country, language=clean_language)
         items = _parse_search_payload(payload, "Steam 搜索", "search", fetched_at)[:count]
     except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError) as exc:
         if entry:
@@ -211,14 +215,14 @@ def _fetch_steam_store_home_feed() -> SteamStoreFeedResult:
     )
 
 
-def _fetch_search_results(search_filter: str, count: int, term: str = "") -> dict:
+def _fetch_search_results(search_filter: str, count: int, term: str = "", country: str = "CN", language: str = "schinese") -> dict:
     params = {
         "json": "1",
         "count": str(count),
         "start": "0",
         "category1": "998",
-        "l": "schinese",
-        "cc": "CN",
+        "l": str(language or "schinese"),
+        "cc": str(country or "CN"),
     }
     if search_filter:
         params["filter"] = search_filter
@@ -412,8 +416,8 @@ def _cache_age_seconds(cache: dict) -> float:
     return (datetime.now() - cached_time).total_seconds()
 
 
-def _search_cache_key(query: str, status_filter: str) -> str:
-    return f"{query.casefold()}|{status_filter}"
+def _search_cache_key(query: str, status_filter: str, country: str = "CN", language: str = "schinese") -> str:
+    return f"{query.casefold()}|{status_filter}|{str(country or 'CN').casefold()}|{str(language or 'schinese').casefold()}"
 
 
 def _search_result_from_cache_entry(

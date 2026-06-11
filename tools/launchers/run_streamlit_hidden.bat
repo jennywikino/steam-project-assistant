@@ -34,6 +34,6 @@ for /f "tokens=5" %%p in ('netstat -ano ^| findstr /R /C:":%PORT% .*LISTENING"')
 )
 
 echo [%date% %time%] 启动 Streamlit：%APP_URL%>> "%LOG_FILE%"
-py -3 -m streamlit run app.py --server.port %PORT% >> "%LOG_FILE%" 2>&1
+py -3 -m streamlit run app.py --server.port %PORT% --server.headless true >> "%LOG_FILE%" 2>&1
 echo [%date% %time%] Streamlit 进程退出，退出码：%ERRORLEVEL%>> "%LOG_FILE%"
 exit /b %ERRORLEVEL%

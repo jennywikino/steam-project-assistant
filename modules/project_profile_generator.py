@@ -5,10 +5,21 @@ from typing import Any
 
 import pandas as pd
 
+from modules.company_dossier import (
+    build_company_dossier_markdown_section,
+    filter_company_dossiers_for_project,
+    load_company_dossiers,
+    parse_company_names,
+)
 from modules.external_intel import (
     build_external_intel_markdown_section,
     filter_external_intel,
     load_external_intel,
+)
+from modules.market_data import (
+    build_market_data_markdown_section,
+    filter_market_data,
+    load_market_data,
 )
 from modules.genre_signal_extractor import GenreSignals, extract_genre_signals, genre_signals_to_dict
 
@@ -209,6 +220,8 @@ def _assess_data_quality(info: dict, tags: list[str], user_demo_played: str = ""
         return "high"
     if has_name and has_party and has_tags and has_media:
         return "medium"
+    if has_name and has_reviews:
+        return "medium"
     return "low"
 
 
@@ -225,6 +238,15 @@ def _markdown_quick_screening(profile: ProjectProfile) -> str:
         )
 
     if level == "medium":
+        if has_reviews and not _has_value((profile.raw_store_info or {}).get("developer")):
+            return "\n".join(
+                [
+                    "- 数据部分可用，需人工确认。",
+                    f"- 好评率 / 评测数：{profile.basic_info.get('好评率', PLACEHOLDER)} / {profile.basic_info.get('评测数', PLACEHOLDER)}",
+                    "- 商店详情可能受地区限制或页面展示影响，需打开 Steam / SteamDB 人工复核。",
+                    "- 下一步动作：补开发商、发行商、商店图文和社区声量。",
+                ]
+            )
         return "\n".join(
             [
                 f"- 类型定位：{_quick_text(profile, '游戏类型 / 赛道定位')}",
@@ -257,7 +279,12 @@ def _markdown_quick_screening(profile: ProjectProfile) -> str:
     return "\n".join(lines)
 
 
-def profile_to_markdown(profile: ProjectProfile, external_intel_records: pd.DataFrame | None = None) -> str:
+def profile_to_markdown(
+    profile: ProjectProfile,
+    external_intel_records: pd.DataFrame | None = None,
+    company_dossier_records: pd.DataFrame | None = None,
+    market_data_records: pd.DataFrame | None = None,
+) -> str:
     game_name = profile.basic_info.get("游戏名", PLACEHOLDER)
     info = profile.raw_store_info or {}
     tags = profile.basic_info.get("类型/标签", PLACEHOLDER)
@@ -267,6 +294,11 @@ def profile_to_markdown(profile: ProjectProfile, external_intel_records: pd.Data
         data_quality_note = "\n当前信息不足，仅生成项目初筛记录，需人工验证。\n"
     quick_section = _markdown_quick_screening(profile)
     external_section = build_external_intel_markdown_section(external_intel_records)
+    associated_companies = _profile_associated_companies(profile)
+    company_dossier_section = build_company_dossier_markdown_section(company_dossier_records, associated_companies)
+    market_data_section = build_market_data_markdown_section(market_data_records)
+    quick_capture_note = str(info.get("quick_capture_note", "") or "").strip()
+    source_note_section = f"\n## 3. 来源备注\n- {quick_capture_note}\n" if quick_capture_note else ""
     return f"""# {game_name} 项目画像草稿
 {data_quality_note}
 ## 0. 快速初筛
@@ -289,7 +321,10 @@ def profile_to_markdown(profile: ProjectProfile, external_intel_records: pd.Data
 - 视频数量：{profile.basic_info.get("视频/Trailer 数量", PLACEHOLDER)}
 - 短描述：{_value(info.get("short_description"))}
 
+{source_note_section}
 {external_section}
+{company_dossier_section}
+{market_data_section}
 ## 5. 人工确认项
 - Demo 前 15 分钟是否抓人
 - 是否已有发行/区域代理
@@ -302,13 +337,29 @@ def profile_to_markdown(profile: ProjectProfile, external_intel_records: pd.Data
 """
 
 
-def profile_to_text(profile: ProjectProfile, external_intel_records: pd.DataFrame | None = None) -> str:
-    text = re.sub(r"^#+\s*", "", profile_to_markdown(profile, external_intel_records), flags=re.MULTILINE)
+def profile_to_text(
+    profile: ProjectProfile,
+    external_intel_records: pd.DataFrame | None = None,
+    company_dossier_records: pd.DataFrame | None = None,
+    market_data_records: pd.DataFrame | None = None,
+) -> str:
+    text = re.sub(
+        r"^#+\s*",
+        "",
+        profile_to_markdown(profile, external_intel_records, company_dossier_records, market_data_records),
+        flags=re.MULTILINE,
+    )
     text = text.replace("- ", "")
     return text.strip() + "\n"
 
 
-def save_profile_reports(profile: ProjectProfile, report_dir: Path, external_intel_csv_path: Path | None = None) -> tuple[Path, Path]:
+def save_profile_reports(
+    profile: ProjectProfile,
+    report_dir: Path,
+    external_intel_csv_path: Path | None = None,
+    company_dossier_csv_path: Path | None = None,
+    market_data_csv_path: Path | None = None,
+) -> tuple[Path, Path]:
     report_dir.mkdir(parents=True, exist_ok=True)
     game_name = profile.basic_info.get("游戏名", "") or "未命名项目"
     filename_stem = f"{safe_filename(game_name)}_项目画像"
@@ -321,8 +372,28 @@ def save_profile_reports(profile: ProjectProfile, report_dir: Path, external_int
             appid=profile.basic_info.get("AppID", ""),
             game_name=game_name,
         )
-    markdown_path.write_text(profile_to_markdown(profile, external_intel_records), encoding="utf-8")
-    txt_path.write_text(profile_to_text(profile, external_intel_records), encoding="utf-8")
+    company_dossier_records = pd.DataFrame()
+    if company_dossier_csv_path is not None:
+        company_dossier_records = filter_company_dossiers_for_project(
+            load_company_dossiers(company_dossier_csv_path),
+            appid=profile.basic_info.get("AppID", ""),
+            game_name=game_name,
+        )
+    market_data_records = pd.DataFrame()
+    if market_data_csv_path is not None:
+        market_data_records = filter_market_data(
+            load_market_data(market_data_csv_path),
+            appid=profile.basic_info.get("AppID", ""),
+            game_name=game_name,
+        )
+    markdown_path.write_text(
+        profile_to_markdown(profile, external_intel_records, company_dossier_records, market_data_records),
+        encoding="utf-8",
+    )
+    txt_path.write_text(
+        profile_to_text(profile, external_intel_records, company_dossier_records, market_data_records),
+        encoding="utf-8",
+    )
     return markdown_path, txt_path
 
 
@@ -345,6 +416,26 @@ def profile_summary_for_project(profile: ProjectProfile) -> dict[str, str]:
         "risks": "\n".join(profile.risks),
         "next_action": profile.next_action,
     }
+
+
+def _profile_associated_companies(profile: ProjectProfile) -> list[tuple[str, str]]:
+    info = profile.raw_store_info or {}
+    developer_names = (
+        parse_company_names(info.get("developers"))
+        or parse_company_names(info.get("developer"))
+        or parse_company_names(profile.basic_info.get("开发商"))
+    )
+    publisher_names = (
+        parse_company_names(info.get("publishers"))
+        or parse_company_names(info.get("publisher"))
+        or parse_company_names(profile.basic_info.get("发行商"))
+    )
+    companies = []
+    for name in developer_names:
+        companies.append(("developer", name))
+    for name in publisher_names:
+        companies.append(("publisher", name))
+    return companies
 
 
 def _build_core_gameplay_judgment(

@@ -53,6 +53,10 @@ def normalize_steam_game_data(
         "median_playtime_at_review_hours": review_stats.get("median_playtime_at_review_hours"),
         "avg_playtime_at_review_hours": review_stats.get("avg_playtime_at_review_hours"),
         "review_stats_status": review_stats.get("review_stats_status", "评价未获取"),
+        "appdetails_region_used": appdetails.get("appdetails_region_used", ""),
+        "html_fallback_status": appdetails.get("html_fallback_status", ""),
+        "suspected_region_restricted": appdetails.get("suspected_region_restricted", ""),
+        "steam_data_status": appdetails.get("steam_data_status", ""),
         "data_status": _data_status(appdetails, review_stats),
     }
 
@@ -74,7 +78,11 @@ def _join_list(value) -> str:
 def _data_status(appdetails: dict, review_stats: dict) -> str:
     parts = []
     if appdetails:
-        parts.append(f"appdetails:{appdetails.get('detail_fetch_status') or appdetails.get('cache_status') or '已读取'}")
+        if appdetails.get("steam_data_status"):
+            parts.append(str(appdetails.get("steam_data_status")))
+        else:
+            parts.append(f"appdetails:{appdetails.get('detail_fetch_status') or appdetails.get('cache_status') or '已读取'}")
     if review_stats:
-        parts.append(f"reviews:{review_stats.get('review_stats_status') or review_stats.get('cache_status') or '已读取'}")
+        review_status = review_stats.get("review_stats_status") or review_stats.get("cache_status") or "已读取"
+        parts.append(f"评测数据：{review_status}")
     return " / ".join(parts) if parts else "未获取"

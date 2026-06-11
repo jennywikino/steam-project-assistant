@@ -1,0 +1,7 @@
+{
+  "enable_gamalytic_api": false,
+  "gamalytic_api_key": "",
+  "enable_vgi_api": false,
+  "vgi_api_key": "",
+  "enable_steamspy_api": false
+}

@@ -48,7 +48,7 @@ if "%FOUND_OLD%"=="1" (
 )
 
 echo [%date% %time%] 启动 Streamlit：%APP_URL%>> "%LOG_FILE%"
-%PYTHON_CMD% -m streamlit run app.py --server.port %PORT% >> "%LOG_FILE%" 2>&1
+%PYTHON_CMD% -m streamlit run app.py --server.port %PORT% --server.headless true >> "%LOG_FILE%" 2>&1
 echo [%date% %time%] Streamlit 进程退出，退出码：%ERRORLEVEL%>> "%LOG_FILE%"
 exit /b %ERRORLEVEL%
 
