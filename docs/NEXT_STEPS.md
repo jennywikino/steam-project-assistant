@@ -133,3 +133,15 @@
 
 - 手动复测 Wuthering Waves 普通文本搜索、Steam 链接直查和 AppID 直查三条路径。
 - 继续保持候选确认后再写历史，不接 SteamSpy / VGI / Gamalytic API。
+
+## V0.6.12 后续
+
+- 手动抽查 3513350 等 AppID 的 Steam 动态刷新、旧缓存兜底和无公告项目空态。
+- 继续不接 AI / SteamSpy / VGI / Gamalytic API，不做评论深度分析。
+
+## V0.6.12-hotfix 后续
+
+- 手动复测 Steam 动态摘要、打开原文、Markdown/TXT 导出和无动态空态。
+- 继续不做机器翻译，英文动态只显示清洗后的原文摘要。
+
+V0.6.12-hotfix2：复测 Markdown 图像报告预览与导出，确认 steam_news_result 参数兼容。

@@ -418,3 +418,15 @@ V0.6.11a-hotfix：修复启动工具只打开浏览器但未启动 Streamlit 服
 
 - 查查普通文本搜索改为低信任候选：主候选只显示高相关或本地精确匹配，低相关候选默认折叠。
 - 候选卡片补充 appdetails 图文预览、相关性评分和匹配原因。
+
+## V0.6.12
+
+- 项目画像新增 Steam 动态 / 公告面板，位于商店图文预览之后、项目初筛卡之前。
+- Steam News 支持 6 小时本地缓存、手动刷新和 Markdown 导出章节。
+
+## V0.6.12-hotfix
+
+- Steam 动态摘要改为清洗后文本，去除 HTML/BBCode/转义符和纯链接噪声。
+- Markdown/TXT 导出兼容 Steam 动态参数，避免报告生成 TypeError。
+
+V0.6.12-hotfix2：修复 Markdown 图像报告导出时 steam_news_result 参数不兼容导致的 TypeError。

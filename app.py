@@ -153,6 +153,10 @@ from modules.steam_competitor_finder import (
     find_steam_competitor_candidates,
 )
 from modules.steam_image_cache import get_cached_steam_image
+from modules.steam_news_fetcher import (
+    get_steam_news_for_app,
+    steam_news_status_label,
+)
 from modules.steam_appdetails_cache import (
     clear_invalid_appdetails_cache,
     count_missing_field_cache_entries,
@@ -201,6 +205,7 @@ HOME_SNAPSHOT_IMAGE_DIR = BASE_DIR / "data" / "snapshots"
 HOME_FEED_CACHE_PATH = BASE_DIR / "data" / "cache" / "home_feed_cache.json"
 STEAM_HOME_FEED_CACHE_PATH = BASE_DIR / "data" / "cache" / "steam_home_feed_cache.json"
 STEAM_SEARCH_CACHE_PATH = BASE_DIR / "data" / "cache" / "steam_search_cache.json"
+STEAM_NEWS_CACHE_DIR = BASE_DIR / "data" / "cache" / "steam_news"
 STEAM_IMAGE_CACHE_PATH = BASE_DIR / "data" / "cache" / "steam_images_cache.json"
 STEAM_APPDETAILS_CACHE_PATH = BASE_DIR / "data" / "cache" / "steam_appdetails_cache.json"
 STEAM_REVIEW_STATS_CACHE_PATH = BASE_DIR / "data" / "cache" / "steam_review_stats_cache.json"
@@ -571,6 +576,7 @@ def render_profile_draft(profile: ProjectProfile) -> None:
         st.dataframe(pd.DataFrame(basic_rows), use_container_width=True, hide_index=True)
 
     render_profile_store_media_preview(profile)
+    render_profile_steam_news_panel(profile)
 
     st.markdown("### 项目初筛卡")
 
@@ -631,11 +637,14 @@ def render_profile_draft(profile: ProjectProfile) -> None:
     render_profile_market_data(profile)
     render_profile_external_intel(profile)
 
+    profile_appid = str(info.get("appid", "") or profile.basic_info.get("AppID", "") or "").strip()
+    steam_news_result = st.session_state.get(f"profile_steam_news_result_{profile_appid}", {}) if profile_appid else {}
     data_source_items = [
         f"Steam AppID：{profile.basic_info.get('AppID', PLACEHOLDER)}",
         f"Steam 链接：{profile.basic_info.get('Steam 链接', PLACEHOLDER)}",
         f"数据状态：{info.get('data_status', PLACEHOLDER)}",
         f"评价状态：{info.get('review_stats_status', PLACEHOLDER)}",
+        f"Steam 动态：{steam_news_status_label(steam_news_result)}",
         f"appdetails_region_used：{info.get('appdetails_region_used', PLACEHOLDER)}",
         f"html_fallback_status：{info.get('html_fallback_status', PLACEHOLDER)}",
         f"suspected_region_restricted：{info.get('suspected_region_restricted', PLACEHOLDER)}",
@@ -696,6 +705,61 @@ def render_profile_store_media_preview(profile: ProjectProfile) -> None:
     render_profile_screenshot_preview(screenshots)
     render_profile_movie_preview(movies, str(info.get("steam_url", "") or profile.basic_info.get("Steam 链接", "")))
     st.caption(build_profile_visual_hint(screenshots, movies))
+
+
+def render_profile_steam_news_panel(profile: ProjectProfile) -> None:
+    info = profile.raw_store_info or {}
+    appid = str(info.get("appid", "") or profile.basic_info.get("AppID", "") or "").strip()
+    st.markdown("### Steam 动态 / 公告")
+    if not appid or appid == PLACEHOLDER:
+        st.info("暂无 Steam 动态：缺少 AppID。")
+        st.caption("Steam 动态来自公开新闻/公告接口，仅用于辅助判断版本更新与运营活跃度，需人工复核。")
+        return
+
+    force_key = f"profile_steam_news_force_refresh_{appid}"
+    force_refresh = bool(st.session_state.pop(force_key, False))
+    news_result = get_steam_news_for_app(appid, STEAM_NEWS_CACHE_DIR, count=5, maxlength=500, force_refresh=force_refresh)
+    st.session_state[f"profile_steam_news_result_{appid}"] = news_result
+    status_label = steam_news_status_label(news_result)
+    st.caption(f"Steam 动态：{status_label}")
+    st.caption("接口摘要可能不是当前 Steam 页面语言；如需确认中文公告，请打开原文。")
+    if news_result.get("error_message"):
+        st.warning(news_result["error_message"])
+
+    action_cols = st.columns([1, 1, 2])
+    if action_cols[0].button("刷新 Steam 动态", key=f"profile_refresh_steam_news_{appid}", use_container_width=True):
+        st.session_state[force_key] = True
+        st.rerun()
+    with action_cols[1]:
+        st.link_button("打开 Steam 新闻页", f"https://store.steampowered.com/news/app/{appid}", use_container_width=True)
+
+    items = news_result.get("items", []) if isinstance(news_result.get("items"), list) else []
+    if not items:
+        st.info("暂无 Steam 动态，可能是接口无返回或项目未发布公告。")
+        st.caption("Steam 动态来自公开新闻/公告接口，仅用于辅助判断版本更新与运营活跃度，需人工复核。")
+        return
+
+    for index, item in enumerate(items[:5], start=1):
+        title = str(item.get("title", "") or "未命名公告")
+        source = str(item.get("feedlabel") or item.get("feedname") or "Steam News")
+        date_text = str(item.get("date", "") or "未记录")
+        summary = str(item.get("clean_summary") or item.get("contents") or "暂无摘要")
+        full_clean = str(item.get("contents") or summary or "暂无摘要")
+        url = str(item.get("url", "") or "").strip()
+        st.markdown(f"**{index}. {title}**")
+        st.caption(f"{date_text} · {source}")
+        st.write(summary)
+        if full_clean and full_clean != summary:
+            with st.expander("查看完整清洗内容", expanded=False):
+                st.write(full_clean)
+        link_cols = st.columns([1, 2])
+        with link_cols[0]:
+            if url:
+                st.link_button("打开原文", url, use_container_width=True)
+        with link_cols[1]:
+            if url:
+                st.text_input("复制新闻链接", value=url, key=f"profile_steam_news_copy_{appid}_{index}")
+    st.caption("Steam 动态来自公开新闻/公告接口，仅用于辅助判断版本更新与运营活跃度，需人工复核。")
 
 
 def render_profile_screenshot_preview(screenshots: list[dict]) -> None:
@@ -2391,6 +2455,7 @@ def render_profile_actions(profile: ProjectProfile) -> None:
                 EXTERNAL_INTEL_CSV_PATH,
                 COMPANY_DOSSIER_CSV_PATH,
                 MARKET_DATA_CSV_PATH,
+                STEAM_NEWS_CACHE_DIR,
             )
             st.success(f"Markdown 画像报告已生成：{markdown_path}")
     with col3:
@@ -2401,6 +2466,7 @@ def render_profile_actions(profile: ProjectProfile) -> None:
                 EXTERNAL_INTEL_CSV_PATH,
                 COMPANY_DOSSIER_CSV_PATH,
                 MARKET_DATA_CSV_PATH,
+                STEAM_NEWS_CACHE_DIR,
             )
             st.success(f"TXT 画像报告已生成：{txt_path}")
 
@@ -2435,7 +2501,20 @@ def render_profile_actions(profile: ProjectProfile) -> None:
             appid=profile.basic_info.get("AppID", ""),
             game_name=profile.basic_info.get("游戏名", ""),
         )
-        st.code(profile_to_markdown(profile, external_records, company_records, market_records), language="markdown")
+        appid = str(profile.basic_info.get("AppID", "") or "").strip()
+        steam_news_result = st.session_state.get(f"profile_steam_news_result_{appid}", {}) if appid else {}
+        if not steam_news_result and appid:
+            steam_news_result = get_steam_news_for_app(appid, STEAM_NEWS_CACHE_DIR, count=5, maxlength=500, force_refresh=False)
+        st.code(
+            profile_to_markdown(
+                profile,
+                external_records,
+                company_records,
+                market_records,
+                steam_news_result=steam_news_result,
+            ),
+            language="markdown",
+        )
 
 
 def save_profile_as_project(profile: ProjectProfile, allow_duplicate: bool = False) -> None:

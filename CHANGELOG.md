@@ -388,3 +388,15 @@ V0.6.11a-hotfix：修复启动工具只打开浏览器但未启动 Streamlit 服
 
 - 修复查查普通文本搜索低相关候选误导问题，候选增加相关性评分和图文预览。
 - 低相关候选默认折叠，找不到高相关结果时提示使用 Steam 链接或 AppID。
+
+## V0.6.12
+
+- 新增 Steam 动态 / 公告面板，支持按 AppID 获取最近公告、更新记录、活动新闻。
+- 增加 Steam News 本地缓存，项目画像 Markdown 导出加入 Steam 动态章节。
+
+## V0.6.12-hotfix
+
+- 修复 Steam 动态 Markdown 导出参数不匹配报错。
+- 增加 Steam 动态内容清洗，去除 HTML/BBCode/转义噪声，并提示接口摘要语言可能不同于当前 Steam 页面语言。
+
+V0.6.12-hotfix2：修复 Markdown 图像报告导出时 steam_news_result 参数不兼容导致的 TypeError。

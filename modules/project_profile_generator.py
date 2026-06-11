@@ -21,6 +21,7 @@ from modules.market_data import (
     filter_market_data,
     load_market_data,
 )
+from modules.steam_news_fetcher import build_steam_news_markdown_section, get_steam_news_for_app
 from modules.genre_signal_extractor import GenreSignals, extract_genre_signals, genre_signals_to_dict
 
 
@@ -280,10 +281,12 @@ def _markdown_quick_screening(profile: ProjectProfile) -> str:
 
 
 def profile_to_markdown(
-    profile: ProjectProfile,
-    external_intel_records: pd.DataFrame | None = None,
-    company_dossier_records: pd.DataFrame | None = None,
-    market_data_records: pd.DataFrame | None = None,
+    profile,
+    external_intel_records=None,
+    company_dossier_records=None,
+    market_data_records=None,
+    steam_news_result: dict | None = None,
+    **_ignored,
 ) -> str:
     game_name = profile.basic_info.get("游戏名", PLACEHOLDER)
     info = profile.raw_store_info or {}
@@ -297,6 +300,7 @@ def profile_to_markdown(
     associated_companies = _profile_associated_companies(profile)
     company_dossier_section = build_company_dossier_markdown_section(company_dossier_records, associated_companies)
     market_data_section = build_market_data_markdown_section(market_data_records)
+    steam_news_section = build_steam_news_markdown_section(steam_news_result)
     quick_capture_note = str(info.get("quick_capture_note", "") or "").strip()
     source_note_section = f"\n## 3. 来源备注\n- {quick_capture_note}\n" if quick_capture_note else ""
     return f"""# {game_name} 项目画像草稿
@@ -321,6 +325,7 @@ def profile_to_markdown(
 - 视频数量：{profile.basic_info.get("视频/Trailer 数量", PLACEHOLDER)}
 - 短描述：{_value(info.get("short_description"))}
 
+{steam_news_section}
 {source_note_section}
 {external_section}
 {company_dossier_section}
@@ -342,11 +347,18 @@ def profile_to_text(
     external_intel_records: pd.DataFrame | None = None,
     company_dossier_records: pd.DataFrame | None = None,
     market_data_records: pd.DataFrame | None = None,
+    steam_news_result: dict | None = None,
 ) -> str:
     text = re.sub(
         r"^#+\s*",
         "",
-        profile_to_markdown(profile, external_intel_records, company_dossier_records, market_data_records),
+        profile_to_markdown(
+            profile,
+            external_intel_records,
+            company_dossier_records,
+            market_data_records,
+            steam_news_result=steam_news_result,
+        ),
         flags=re.MULTILINE,
     )
     text = text.replace("- ", "")
@@ -359,6 +371,7 @@ def save_profile_reports(
     external_intel_csv_path: Path | None = None,
     company_dossier_csv_path: Path | None = None,
     market_data_csv_path: Path | None = None,
+    steam_news_cache_dir: Path | None = None,
 ) -> tuple[Path, Path]:
     report_dir.mkdir(parents=True, exist_ok=True)
     game_name = profile.basic_info.get("游戏名", "") or "未命名项目"
@@ -386,12 +399,33 @@ def save_profile_reports(
             appid=profile.basic_info.get("AppID", ""),
             game_name=game_name,
         )
+    steam_news_result = None
+    if steam_news_cache_dir is not None:
+        steam_news_result = get_steam_news_for_app(
+            str(profile.basic_info.get("AppID", "") or ""),
+            steam_news_cache_dir,
+            count=5,
+            maxlength=500,
+            force_refresh=False,
+        )
     markdown_path.write_text(
-        profile_to_markdown(profile, external_intel_records, company_dossier_records, market_data_records),
+        profile_to_markdown(
+            profile,
+            external_intel_records,
+            company_dossier_records,
+            market_data_records,
+            steam_news_result=steam_news_result,
+        ),
         encoding="utf-8",
     )
     txt_path.write_text(
-        profile_to_text(profile, external_intel_records, company_dossier_records, market_data_records),
+        profile_to_text(
+            profile,
+            external_intel_records,
+            company_dossier_records,
+            market_data_records,
+            steam_news_result=steam_news_result,
+        ),
         encoding="utf-8",
     )
     return markdown_path, txt_path
