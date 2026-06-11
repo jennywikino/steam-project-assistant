@@ -430,3 +430,8 @@ V0.6.11a-hotfix：修复启动工具只打开浏览器但未启动 Streamlit 服
 - Markdown/TXT 导出兼容 Steam 动态参数，避免报告生成 TypeError。
 
 V0.6.12-hotfix2：修复 Markdown 图像报告导出时 steam_news_result 参数不兼容导致的 TypeError。
+
+## V0.6.13
+
+- 项目画像新增 Steam 评论预览，位于 Steam 动态之后、项目初筛卡之前。
+- 支持最近评论、有价值评论、最近差评少量样本展示，并写入 Markdown 图像报告。

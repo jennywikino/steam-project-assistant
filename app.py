@@ -157,6 +157,11 @@ from modules.steam_news_fetcher import (
     get_steam_news_for_app,
     steam_news_status_label,
 )
+from modules.steam_review_preview import (
+    format_playtime as format_review_preview_playtime,
+    get_steam_review_preview,
+    steam_review_preview_status_label,
+)
 from modules.steam_appdetails_cache import (
     clear_invalid_appdetails_cache,
     count_missing_field_cache_entries,
@@ -206,6 +211,7 @@ HOME_FEED_CACHE_PATH = BASE_DIR / "data" / "cache" / "home_feed_cache.json"
 STEAM_HOME_FEED_CACHE_PATH = BASE_DIR / "data" / "cache" / "steam_home_feed_cache.json"
 STEAM_SEARCH_CACHE_PATH = BASE_DIR / "data" / "cache" / "steam_search_cache.json"
 STEAM_NEWS_CACHE_DIR = BASE_DIR / "data" / "cache" / "steam_news"
+STEAM_REVIEW_PREVIEW_CACHE_DIR = BASE_DIR / "data" / "cache" / "steam_reviews_preview"
 STEAM_IMAGE_CACHE_PATH = BASE_DIR / "data" / "cache" / "steam_images_cache.json"
 STEAM_APPDETAILS_CACHE_PATH = BASE_DIR / "data" / "cache" / "steam_appdetails_cache.json"
 STEAM_REVIEW_STATS_CACHE_PATH = BASE_DIR / "data" / "cache" / "steam_review_stats_cache.json"
@@ -577,6 +583,7 @@ def render_profile_draft(profile: ProjectProfile) -> None:
 
     render_profile_store_media_preview(profile)
     render_profile_steam_news_panel(profile)
+    render_profile_steam_review_preview(profile)
 
     st.markdown("### 项目初筛卡")
 
@@ -639,12 +646,14 @@ def render_profile_draft(profile: ProjectProfile) -> None:
 
     profile_appid = str(info.get("appid", "") or profile.basic_info.get("AppID", "") or "").strip()
     steam_news_result = st.session_state.get(f"profile_steam_news_result_{profile_appid}", {}) if profile_appid else {}
+    review_preview_result = st.session_state.get(f"profile_review_preview_result_{profile_appid}", {}) if profile_appid else {}
     data_source_items = [
         f"Steam AppID：{profile.basic_info.get('AppID', PLACEHOLDER)}",
         f"Steam 链接：{profile.basic_info.get('Steam 链接', PLACEHOLDER)}",
         f"数据状态：{info.get('data_status', PLACEHOLDER)}",
         f"评价状态：{info.get('review_stats_status', PLACEHOLDER)}",
         f"Steam 动态：{steam_news_status_label(steam_news_result)}",
+        f"Steam 评论预览：{steam_review_preview_status_label(review_preview_result)}",
         f"appdetails_region_used：{info.get('appdetails_region_used', PLACEHOLDER)}",
         f"html_fallback_status：{info.get('html_fallback_status', PLACEHOLDER)}",
         f"suspected_region_restricted：{info.get('suspected_region_restricted', PLACEHOLDER)}",
@@ -760,6 +769,77 @@ def render_profile_steam_news_panel(profile: ProjectProfile) -> None:
             if url:
                 st.text_input("复制新闻链接", value=url, key=f"profile_steam_news_copy_{appid}_{index}")
     st.caption("Steam 动态来自公开新闻/公告接口，仅用于辅助判断版本更新与运营活跃度，需人工复核。")
+
+
+def render_profile_steam_review_preview(profile: ProjectProfile) -> None:
+    info = profile.raw_store_info or {}
+    appid = str(info.get("appid", "") or profile.basic_info.get("AppID", "") or "").strip()
+    st.markdown("### Steam 评论预览")
+    if not appid or appid == PLACEHOLDER:
+        st.info("暂无评论预览：缺少 AppID。")
+        return
+
+    force_key = f"profile_review_preview_force_refresh_{appid}"
+    force_refresh = bool(st.session_state.pop(force_key, False))
+    review_result = get_steam_review_preview(
+        appid,
+        STEAM_REVIEW_PREVIEW_CACHE_DIR,
+        language="schinese",
+        num_per_group=3,
+        force_refresh=force_refresh,
+    )
+    st.session_state[f"profile_review_preview_result_{appid}"] = review_result
+    if review_result.get("error_message"):
+        st.warning(review_result["error_message"])
+
+    status = steam_review_preview_status_label(review_result)
+    summary = review_result.get("summary", {}) if isinstance(review_result.get("summary"), dict) else {}
+    st.caption(f"Steam 评论预览：{status}")
+    metric_cols = st.columns(3)
+    metric_cols[0].metric("好评率", format_positive_rate(summary.get("positive_rate") or info.get("positive_rate")))
+    metric_cols[1].metric("总评测数", format_review_total(summary.get("review_total") or info.get("review_total")))
+    metric_cols[2].metric("评价描述", str(summary.get("review_score_desc") or info.get("review_score_desc") or "未获取"))
+
+    action_cols = st.columns([1, 1, 2])
+    if action_cols[0].button("刷新评论预览", key=f"profile_refresh_review_preview_{appid}", use_container_width=True):
+        st.session_state[force_key] = True
+        st.rerun()
+    with action_cols[1]:
+        st.link_button("打开 Steam 评论页", f"https://steamcommunity.com/app/{appid}/reviews/", use_container_width=True)
+
+    groups = [
+        ("最近评论", review_result.get("recent_reviews", [])),
+        ("有价值评论", review_result.get("helpful_reviews", [])),
+        ("最近差评", review_result.get("negative_reviews", [])),
+    ]
+    if not any(items for _, items in groups):
+        st.info("暂无评论预览，可能是接口无返回或项目暂无公开评论。")
+        return
+
+    for group_title, reviews in groups:
+        st.markdown(f"**{group_title}**")
+        if not reviews:
+            st.caption("暂无")
+            continue
+        for index, review in enumerate(reviews[:3], start=1):
+            render_profile_review_preview_item(review, f"{appid}_{group_title}_{index}")
+
+    st.caption("Steam 评论预览仅拉取少量公开样本，用于快速判断玩家反馈方向，不替代完整评论分析器。")
+
+
+def render_profile_review_preview_item(review: dict, key_suffix: str) -> None:
+    voted_label = "推荐" if review.get("voted_up") else "不推荐"
+    created_at = str(review.get("created_at", "") or "未获取")
+    playtime = format_review_preview_playtime(review.get("author_playtime_at_review") or review.get("author_playtime_forever"))
+    votes_up = str(review.get("votes_up", 0) or 0)
+    preview = str(review.get("review_preview") or review.get("review") or "暂无评论正文")
+    full_text = str(review.get("review") or preview)
+
+    st.markdown(f"- **{voted_label}** · {created_at} · 游玩 {playtime} · 点赞 {votes_up}")
+    st.write(preview)
+    if full_text and full_text != preview:
+        with st.expander("展开查看完整评论", expanded=False):
+            st.write(full_text)
 
 
 def render_profile_screenshot_preview(screenshots: list[dict]) -> None:
@@ -2456,6 +2536,7 @@ def render_profile_actions(profile: ProjectProfile) -> None:
                 COMPANY_DOSSIER_CSV_PATH,
                 MARKET_DATA_CSV_PATH,
                 STEAM_NEWS_CACHE_DIR,
+                STEAM_REVIEW_PREVIEW_CACHE_DIR,
             )
             st.success(f"Markdown 画像报告已生成：{markdown_path}")
     with col3:
@@ -2467,6 +2548,7 @@ def render_profile_actions(profile: ProjectProfile) -> None:
                 COMPANY_DOSSIER_CSV_PATH,
                 MARKET_DATA_CSV_PATH,
                 STEAM_NEWS_CACHE_DIR,
+                STEAM_REVIEW_PREVIEW_CACHE_DIR,
             )
             st.success(f"TXT 画像报告已生成：{txt_path}")
 
@@ -2505,6 +2587,15 @@ def render_profile_actions(profile: ProjectProfile) -> None:
         steam_news_result = st.session_state.get(f"profile_steam_news_result_{appid}", {}) if appid else {}
         if not steam_news_result and appid:
             steam_news_result = get_steam_news_for_app(appid, STEAM_NEWS_CACHE_DIR, count=5, maxlength=500, force_refresh=False)
+        review_preview_result = st.session_state.get(f"profile_review_preview_result_{appid}", {}) if appid else {}
+        if not review_preview_result and appid:
+            review_preview_result = get_steam_review_preview(
+                appid,
+                STEAM_REVIEW_PREVIEW_CACHE_DIR,
+                language="schinese",
+                num_per_group=3,
+                force_refresh=False,
+            )
         st.code(
             profile_to_markdown(
                 profile,
@@ -2512,6 +2603,7 @@ def render_profile_actions(profile: ProjectProfile) -> None:
                 company_records,
                 market_records,
                 steam_news_result=steam_news_result,
+                steam_review_preview_result=review_preview_result,
             ),
             language="markdown",
         )

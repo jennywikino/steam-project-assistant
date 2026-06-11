@@ -22,6 +22,7 @@ from modules.market_data import (
     load_market_data,
 )
 from modules.steam_news_fetcher import build_steam_news_markdown_section, get_steam_news_for_app
+from modules.steam_review_preview import build_steam_review_preview_markdown_section, get_steam_review_preview
 from modules.genre_signal_extractor import GenreSignals, extract_genre_signals, genre_signals_to_dict
 
 
@@ -286,6 +287,7 @@ def profile_to_markdown(
     company_dossier_records=None,
     market_data_records=None,
     steam_news_result: dict | None = None,
+    steam_review_preview_result: dict | None = None,
     **_ignored,
 ) -> str:
     game_name = profile.basic_info.get("游戏名", PLACEHOLDER)
@@ -301,6 +303,7 @@ def profile_to_markdown(
     company_dossier_section = build_company_dossier_markdown_section(company_dossier_records, associated_companies)
     market_data_section = build_market_data_markdown_section(market_data_records)
     steam_news_section = build_steam_news_markdown_section(steam_news_result)
+    steam_review_preview_section = build_steam_review_preview_markdown_section(steam_review_preview_result)
     quick_capture_note = str(info.get("quick_capture_note", "") or "").strip()
     source_note_section = f"\n## 3. 来源备注\n- {quick_capture_note}\n" if quick_capture_note else ""
     return f"""# {game_name} 项目画像草稿
@@ -326,6 +329,7 @@ def profile_to_markdown(
 - 短描述：{_value(info.get("short_description"))}
 
 {steam_news_section}
+{steam_review_preview_section}
 {source_note_section}
 {external_section}
 {company_dossier_section}
@@ -348,6 +352,7 @@ def profile_to_text(
     company_dossier_records: pd.DataFrame | None = None,
     market_data_records: pd.DataFrame | None = None,
     steam_news_result: dict | None = None,
+    steam_review_preview_result: dict | None = None,
 ) -> str:
     text = re.sub(
         r"^#+\s*",
@@ -358,6 +363,7 @@ def profile_to_text(
             company_dossier_records,
             market_data_records,
             steam_news_result=steam_news_result,
+            steam_review_preview_result=steam_review_preview_result,
         ),
         flags=re.MULTILINE,
     )
@@ -372,6 +378,7 @@ def save_profile_reports(
     company_dossier_csv_path: Path | None = None,
     market_data_csv_path: Path | None = None,
     steam_news_cache_dir: Path | None = None,
+    steam_review_preview_cache_dir: Path | None = None,
 ) -> tuple[Path, Path]:
     report_dir.mkdir(parents=True, exist_ok=True)
     game_name = profile.basic_info.get("游戏名", "") or "未命名项目"
@@ -408,6 +415,15 @@ def save_profile_reports(
             maxlength=500,
             force_refresh=False,
         )
+    steam_review_preview_result = None
+    if steam_review_preview_cache_dir is not None:
+        steam_review_preview_result = get_steam_review_preview(
+            str(profile.basic_info.get("AppID", "") or ""),
+            steam_review_preview_cache_dir,
+            language="schinese",
+            num_per_group=3,
+            force_refresh=False,
+        )
     markdown_path.write_text(
         profile_to_markdown(
             profile,
@@ -415,6 +431,7 @@ def save_profile_reports(
             company_dossier_records,
             market_data_records,
             steam_news_result=steam_news_result,
+            steam_review_preview_result=steam_review_preview_result,
         ),
         encoding="utf-8",
     )
@@ -425,6 +442,7 @@ def save_profile_reports(
             company_dossier_records,
             market_data_records,
             steam_news_result=steam_news_result,
+            steam_review_preview_result=steam_review_preview_result,
         ),
         encoding="utf-8",
     )

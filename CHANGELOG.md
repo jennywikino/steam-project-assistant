@@ -400,3 +400,8 @@ V0.6.11a-hotfix：修复启动工具只打开浏览器但未启动 Streamlit 服
 - 增加 Steam 动态内容清洗，去除 HTML/BBCode/转义噪声，并提示接口摘要语言可能不同于当前 Steam 页面语言。
 
 V0.6.12-hotfix2：修复 Markdown 图像报告导出时 steam_news_result 参数不兼容导致的 TypeError。
+
+## V0.6.13
+
+- 新增 Steam 评论预览模块，支持最近评论、有价值评论、最近差评少量展示。
+- Markdown 图像报告加入评论预览章节；评论预览仅用于快速判断，不替代完整评论分析器。
