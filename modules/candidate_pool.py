@@ -1,10 +1,12 @@
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 import re
 from uuid import uuid4
 
 import pandas as pd
+from openpyxl.styles import Font
 
 from modules.publishing_rules import evaluate_publishing_candidate
 
@@ -198,6 +200,81 @@ EXPORT_COLUMNS = [
     "owner_note",
     "reject_reason",
     "updated_at",
+]
+
+V070_EXPORT_COLUMNS = [
+    "game_name",
+    "appid",
+    "developer",
+    "publisher",
+    "release_status",
+    "release_date",
+    "has_demo",
+    "supports_schinese",
+    "genres_tags",
+    "review_score",
+    "review_count",
+    "steamdb_followers",
+    "peak_ccu",
+    "stage",
+    "priority",
+    "auto_suggestion",
+    "auto_reason",
+    "next_action",
+    "data_completeness",
+    "missing_items",
+    "steam_url",
+    "steamdb_url",
+    "updated_at",
+    "owner_note",
+    "reject_reason",
+]
+
+V070_DAILY_REPORT_COLUMNS = [
+    "game_name",
+    "appid",
+    "developer",
+    "publisher",
+    "release_status",
+    "has_demo",
+    "supports_schinese",
+    "auto_suggestion",
+    "next_action",
+    "missing_items",
+    "owner_note",
+]
+
+V071_FORMAL_CANDIDATE_COLUMNS = [
+    "game_name",
+    "appid",
+    "developer",
+    "publisher",
+    "release_status",
+    "release_date",
+    "has_demo",
+    "supports_schinese",
+    "genres_tags",
+    "auto_suggestion",
+    "auto_reason",
+    "next_action",
+    "priority",
+    "stage",
+    "missing_items",
+    "steam_url",
+    "steamdb_url",
+    "owner_note",
+]
+
+V071_REFERENCE_GAME_KEYWORDS = [
+    "pubg",
+    "apex legends",
+    "counter-strike",
+    "cs2",
+    "path of exile",
+    "wallpaper engine",
+    "rust",
+    "zenless zone zero",
+    "绝区零",
 ]
 
 
@@ -747,6 +824,284 @@ def export_candidate_pool_to_excel(csv_path: Path, export_dir: Path) -> Path:
                 max_length = max(len(str(cell.value or "")) for cell in column_cells)
                 worksheet.column_dimensions[column_cells[0].column_letter].width = min(max(max_length + 2, 12), 36)
     return export_path
+
+
+def export_candidate_pool_v070_to_excel(
+    csv_path: Path,
+    export_dir: Path | None = None,
+    save_to_exports: bool = False,
+) -> dict:
+    data = apply_candidate_data_status(apply_auto_suggestions(load_candidate_pool(csv_path))).fillna("")
+    for column in CANDIDATE_POOL_COLUMNS:
+        if column not in data.columns:
+            data[column] = ""
+    filename = f"candidate_pool_v071_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+
+    playable = _filter_v070_contains(
+        data,
+        ["auto_suggestion", "stage", "next_action"],
+        ["待试玩", "试玩 Demo", "值得联系"],
+    )
+    contact = _filter_v070_contains(data, ["auto_suggestion", "stage"], ["值得联系"])
+    competitor = _filter_v070_contains(data, ["auto_suggestion", "stage"], ["竞品参考"])
+    default_reference = _filter_v071_default_reference(data)
+    if not default_reference.empty:
+        competitor = pd.concat([competitor, default_reference], ignore_index=False).drop_duplicates(
+            subset=["candidate_id", "appid", "game_name"],
+            keep="first",
+        )
+    insufficient = _filter_v070_contains(
+        data,
+        ["auto_suggestion", "data_completeness", "missing_items"],
+        ["待补资料", "资料不足", "缺失"],
+    )
+    paused_or_rejected = _filter_v070_contains(
+        data,
+        ["stage", "auto_suggestion"],
+        ["放弃", "暂缓"],
+    )
+    formal_candidates = _filter_v071_formal_candidates(data)
+
+    sheets = {
+        "全部候选": data,
+        "正式候选": formal_candidates,
+        "待试玩": playable,
+        "值得联系": contact,
+        "竞品参考": competitor,
+        "资料不足": insufficient,
+        # Excel sheet names cannot contain "/", so use a full-width slash.
+        "已放弃／暂缓": paused_or_rejected,
+        "今日日报": data,
+        "工作用日报": formal_candidates,
+    }
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        for sheet_name, frame in sheets.items():
+            if sheet_name == "今日日报":
+                readable_frame = _v070_daily_report_readable(frame)
+            elif sheet_name == "正式候选":
+                readable_frame = _v071_formal_candidates_readable(frame)
+            elif sheet_name == "工作用日报":
+                readable_frame = _v071_work_report_readable(frame)
+            else:
+                readable_frame = _v070_export_readable(frame)
+            readable_frame.to_excel(writer, sheet_name=sheet_name, index=False)
+            _style_candidate_pool_worksheet(writer.book[sheet_name])
+    excel_bytes = output.getvalue()
+
+    export_path = None
+    if save_to_exports:
+        target_dir = export_dir or Path("exports")
+        target_dir.mkdir(parents=True, exist_ok=True)
+        export_path = target_dir / filename
+        export_path.write_bytes(excel_bytes)
+
+    return {
+        "path": export_path,
+        "filename": filename,
+        "bytes": excel_bytes,
+        "sheet_count": len(sheets),
+        "total_count": int(len(data)),
+        "formal_count": int(len(formal_candidates)),
+        "playable_count": int(len(playable)),
+        "contact_count": int(len(contact)),
+        "competitor_count": int(len(competitor)),
+        "insufficient_count": int(len(insufficient)),
+        "paused_rejected_count": int(len(paused_or_rejected)),
+    }
+
+
+def _filter_v070_contains(data: pd.DataFrame, columns: list[str], keywords: list[str]) -> pd.DataFrame:
+    if data.empty:
+        return data.copy()
+    mask = pd.Series(False, index=data.index)
+    for column in columns:
+        if column not in data.columns:
+            continue
+        values = data[column].fillna("").astype(str)
+        for keyword in keywords:
+            mask = mask | values.str.contains(keyword, na=False, regex=False)
+    return data.loc[mask].copy()
+
+
+def _filter_v071_formal_candidates(data: pd.DataFrame) -> pd.DataFrame:
+    if data.empty:
+        return data.copy()
+    mask = data.apply(lambda row: _is_v071_formal_candidate(row.to_dict()), axis=1)
+    return data.loc[mask].copy()
+
+
+def _filter_v071_default_reference(data: pd.DataFrame) -> pd.DataFrame:
+    if data.empty:
+        return data.copy()
+    mask = data.apply(lambda row: _is_v071_reference_candidate(row.to_dict()), axis=1)
+    return data.loc[mask].copy()
+
+
+def _is_v071_formal_candidate(row: dict) -> bool:
+    stage = _clean_export_text(row.get("stage"))
+    auto_suggestion = _clean_export_text(row.get("auto_suggestion"))
+    next_action = _clean_export_text(row.get("next_action"))
+    game_name = _clean_export_text(row.get("game_name"))
+    if _contains_any(stage, ["放弃", "已放弃", "暂缓"]):
+        return False
+    if _is_truthy_export_value(row.get("is_archived")):
+        return False
+    if _contains_any(auto_suggestion, ["竞品参考", "暂缓", "放弃", "待补资料"]):
+        return False
+    if _contains_any(next_action, ["作为竞品参考", "补项目画像", "人工复核", "查发行合作空间"]):
+        return False
+    if _has_v071_exclusion_note(row):
+        return False
+    if _is_v071_default_reference(row):
+        return False
+    if _is_v071_old_release(row):
+        return False
+    if _parse_int(row.get("review_count")) > 10000:
+        return False
+    if not game_name or re.fullmatch(r"AppID\s+\d+", game_name, flags=re.IGNORECASE):
+        return False
+    if not _clean_export_text(row.get("developer")):
+        return False
+    if not _clean_export_text(row.get("appid")):
+        return False
+    if not (next_action or auto_suggestion):
+        return False
+    return True
+
+
+def _is_v071_reference_candidate(row: dict) -> bool:
+    return (
+        _is_v071_default_reference(row)
+        or _is_v071_old_release(row)
+        or _parse_int(row.get("review_count")) > 10000
+    )
+
+
+def _is_v071_default_reference(row: dict) -> bool:
+    name = _clean_export_text(row.get("game_name")).lower()
+    return any(keyword in name for keyword in V071_REFERENCE_GAME_KEYWORDS)
+
+
+def _has_v071_exclusion_note(row: dict) -> bool:
+    note = f"{_clean_export_text(row.get('owner_note'))} {_clean_export_text(row.get('source_notes'))}"
+    return _contains_any(note, ["测试数据", "竞品参考", "成熟项目", "大作", "非发行机会"])
+
+
+def _is_v071_old_release(row: dict) -> bool:
+    release_date = _parse_v071_release_date(row.get("release_date")) or _parse_v071_release_date(row.get("release_status"))
+    if release_date is None:
+        return False
+    return (datetime.now() - release_date).days > 180
+
+
+def _parse_v071_release_date(value) -> datetime | None:
+    text = _clean_export_text(value)
+    if not text:
+        return None
+    chinese_match = re.search(r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日", text)
+    if chinese_match:
+        year, month, day = [int(part) for part in chinese_match.groups()]
+        try:
+            return datetime(year, month, day)
+        except ValueError:
+            return None
+    for pattern in [
+        r"\b[A-Z][a-z]{2,8}\s+\d{1,2},\s+\d{4}\b",
+        r"\b\d{4}-\d{1,2}-\d{1,2}\b",
+        r"\b\d{4}/\d{1,2}/\d{1,2}\b",
+    ]:
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        date_text = match.group(0)
+        for fmt in ["%b %d, %Y", "%B %d, %Y", "%Y-%m-%d", "%Y/%m/%d"]:
+            try:
+                return datetime.strptime(date_text, fmt)
+            except ValueError:
+                continue
+    return None
+
+
+def _contains_any(text: str, keywords: list[str]) -> bool:
+    return any(keyword in text for keyword in keywords)
+
+
+def _is_truthy_export_value(value) -> bool:
+    return _clean_export_text(value).lower() in {"true", "1", "yes", "y", "是", "已归档"}
+
+
+def _clean_export_text(value) -> str:
+    text = str(value or "").strip()
+    if text.lower() in {"nan", "none", "null"}:
+        return ""
+    return text
+
+
+def _v070_export_readable(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        frame = pd.DataFrame(columns=V070_EXPORT_COLUMNS)
+    columns = [column for column in V070_EXPORT_COLUMNS if column in frame.columns]
+    extra_columns = [column for column in frame.columns if column not in columns]
+    readable = frame.loc[:, columns + extra_columns].fillna("").astype(str)
+    return readable.rename(columns=CANDIDATE_POOL_FIELD_LABELS)
+
+
+def _v070_daily_report_readable(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        frame = pd.DataFrame(columns=V070_DAILY_REPORT_COLUMNS)
+    columns = [column for column in V070_DAILY_REPORT_COLUMNS if column in frame.columns]
+    readable = frame.loc[:, columns].fillna("").astype(str)
+    readable = readable.rename(
+        columns={
+            "game_name": "游戏名",
+            "appid": "AppID",
+            "developer": "开发商",
+            "publisher": "发行商",
+            "release_status": "发售状态",
+            "has_demo": "Demo",
+            "supports_schinese": "简中",
+            "auto_suggestion": "自动建议",
+            "next_action": "下一步动作",
+            "missing_items": "缺失项",
+            "owner_note": "备注",
+        }
+    )
+    return readable
+
+
+def _v071_formal_candidates_readable(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        frame = pd.DataFrame(columns=V071_FORMAL_CANDIDATE_COLUMNS)
+    columns = [column for column in V071_FORMAL_CANDIDATE_COLUMNS if column in frame.columns]
+    readable = frame.loc[:, columns].fillna("").astype(str)
+    return readable.rename(columns=CANDIDATE_POOL_FIELD_LABELS)
+
+
+def _v071_work_report_readable(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        frame = pd.DataFrame(columns=V071_FORMAL_CANDIDATE_COLUMNS)
+    output = pd.DataFrame()
+    output["游戏名"] = frame["game_name"].fillna("").astype(str) if "game_name" in frame.columns else ""
+    output["当前判断"] = [
+        _clean_export_text(row.get("auto_suggestion")) or _clean_export_text(row.get("stage"))
+        for _, row in frame.iterrows()
+    ]
+    output["下一步动作"] = frame["next_action"].fillna("").astype(str) if "next_action" in frame.columns else ""
+    output["主要理由"] = frame["auto_reason"].fillna("").astype(str) if "auto_reason" in frame.columns else ""
+    output["缺失项"] = frame["missing_items"].fillna("").astype(str) if "missing_items" in frame.columns else ""
+    output["Steam 链接"] = frame["steam_url"].fillna("").astype(str) if "steam_url" in frame.columns else ""
+    output["备注"] = frame["owner_note"].fillna("").astype(str) if "owner_note" in frame.columns else ""
+    return output
+
+
+def _style_candidate_pool_worksheet(worksheet) -> None:
+    worksheet.freeze_panes = "A2"
+    for cell in worksheet[1]:
+        cell.font = Font(bold=True)
+    for column_cells in worksheet.columns:
+        max_length = max(len(str(cell.value or "")) for cell in column_cells)
+        worksheet.column_dimensions[column_cells[0].column_letter].width = min(max(max_length + 2, 12), 42)
 
 
 def export_daily_candidate_report(csv_path: Path, export_dir: Path, market_data_csv_path: Path | None = None) -> Path:

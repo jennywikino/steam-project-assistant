@@ -4213,22 +4213,35 @@ def render_project_candidate_pool_section() -> None:
         hide_index=True,
     )
 
-    st.caption("导出前提醒：请确认 PUBG / Apex / Rust / CS2 等是否只是测试数据。")
-    if st.button("导出 V0.7 候选池 Excel", key="candidate_pool_export_v070", use_container_width=True):
+    st.caption("导出前提醒：PUBG / Apex / Rust / CS2 / 绝区零等参考或测试项目默认不会进入正式候选。")
+    if st.button("导出 V0.7.1 正式候选 Excel", key="candidate_pool_export_v070", use_container_width=True):
         try:
-            export_result = export_candidate_pool_v070_to_excel(CANDIDATE_POOL_CSV_PATH, BASE_DIR / "exports")
+            export_result = export_candidate_pool_v070_to_excel(CANDIDATE_POOL_CSV_PATH)
         except Exception as exc:
-            st.error(f"导出 V0.7 候选池 Excel 失败：{exc}")
+            st.error(f"导出 V0.7.1 正式候选 Excel 失败：{exc}")
         else:
-            st.success(f"V0.7 候选池 Excel 已导出：{export_result['path']}")
-            result_cols = st.columns(6)
-            result_cols[0].metric("Sheet 数量", export_result["sheet_count"])
-            result_cols[1].metric("总候选数", export_result["total_count"])
-            result_cols[2].metric("待试玩", export_result["playable_count"])
-            result_cols[3].metric("值得联系", export_result["contact_count"])
-            result_cols[4].metric("竞品参考", export_result["competitor_count"])
-            result_cols[5].metric("资料不足", export_result["insufficient_count"])
-            st.caption(f"暂缓 / 放弃数量：{export_result['paused_rejected_count']}")
+            st.success("已生成 Excel，可直接下载")
+            result_cols = st.columns(5)
+            result_cols[0].metric("全部候选", export_result["total_count"])
+            result_cols[1].metric("正式候选", export_result["formal_count"])
+            result_cols[2].metric("竞品参考", export_result["competitor_count"])
+            result_cols[3].metric("资料不足", export_result["insufficient_count"])
+            result_cols[4].metric("已放弃/暂缓", export_result["paused_rejected_count"])
+            filename = str(export_result.get("filename") or "candidate_pool_v071.xlsx")
+            export_bytes = export_result.get("bytes")
+            st.caption(f"文件名：{filename}")
+            if not export_bytes:
+                st.error("本次导出的 Excel 内容为空，无法生成下载按钮。")
+            else:
+                st.download_button(
+                    "下载本次导出的 Excel",
+                    data=export_bytes,
+                    file_name=filename,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"download_candidate_pool_v071_{Path(filename).stem}",
+                    use_container_width=True,
+                )
+                st.caption("下载位置由浏览器控制，如需每次选择保存位置，请在浏览器下载设置中开启“下载前询问保存位置”。")
 
     action_cols = st.columns([1, 1, 1, 2])
     if action_cols[0].button("导出候选清单", key="candidate_pool_export", use_container_width=True):
@@ -9554,7 +9567,7 @@ def render_docs_status_page() -> None:
     st.subheader("文档与状态")
     st.markdown(
         """
-- 当前版本：V0.7.0 可用输出版
+- 当前版本：V0.7.1 正式候选清理与导出落地
 - 数据文件：`data/projects.csv`、`data/candidate_pool.csv`、`data/competitors.csv`、`data/competitor_candidates.csv`、`data/external_intel.csv`
 - 图片目录：`data/snapshots/`
 - 报告目录：`reports/markdown/`、`reports/txt/`、`reports/excel/`、`reports/profile/`
@@ -9590,7 +9603,7 @@ def main() -> None:
     st.set_page_config(page_title="Steam 项目初筛助手", layout="wide")
 
     st.sidebar.title("Steam 项目初筛助手")
-    st.sidebar.info("当前版本：V0.7.0 可用输出版")
+    st.sidebar.info("当前版本：V0.7.1 正式候选清理与导出落地")
     st.sidebar.warning(
         "退出提醒\n\n"
         "- 关闭浏览器标签页不会关闭后台服务。\n"
@@ -9601,7 +9614,7 @@ def main() -> None:
         st.sidebar.code("停止_项目初筛助手.bat", language="bat")
 
     st.title("Steam 项目初筛助手")
-    st.caption("当前版本支持 SteamDB 导入、候选池、基础信息补全和 V0.7 Excel 输出版。")
+    st.caption("当前版本支持 SteamDB 导入、候选池、基础信息补全和 V0.7.1 正式候选导出。")
 
     home_tab, workflow_tab, quick_tab, profile_tab, steamdb_tab, steamdb_import_tab, search_tab, demo_tab, competitor_tab, history_tab, docs_tab = st.tabs(
         ["首页 / 今日看板", "今日工作流", "快速记录", "一键项目画像", "SteamDB 发现", "SteamDB 导入", "搜索中心", "Demo 试玩", "竞品与候选", "历史与导出", "文档与状态"]
