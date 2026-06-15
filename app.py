@@ -291,6 +291,14 @@ def clean_candidate_value(value) -> str:
     return text
 
 
+def is_empty_or_placeholder_game_name(value, appid) -> bool:
+    text = clean_candidate_value(value)
+    clean_appid = str(appid or "").strip()
+    if not text:
+        return True
+    return bool(clean_appid and re.fullmatch(rf"AppID\s+{re.escape(clean_appid)}", text, flags=re.IGNORECASE))
+
+
 def candidate_record_from_mapping(data: dict, *, source: str = "", stage: str = "新发现", priority: str = "未定") -> CandidatePoolRecord:
     appid = clean_candidate_value(data.get("appid") or data.get("AppID"))
     game_name = clean_candidate_value(data.get("game_name") or data.get("title") or data.get("游戏名"))
@@ -531,6 +539,14 @@ def upsert_steamdb_paste_candidate(row: dict) -> str:
         for field in fill_only_fields:
             current_value = clean_candidate_value(existing.get(field))
             new_value = incoming.get(field, "")
+            if field == "game_name":
+                if (
+                    is_empty_or_placeholder_game_name(current_value, appid)
+                    and new_value
+                    and not is_empty_or_placeholder_game_name(new_value, appid)
+                ):
+                    updates[field] = new_value
+                continue
             if not current_value and new_value:
                 updates[field] = new_value
         current_notes = clean_candidate_value(existing.get("source_notes"))

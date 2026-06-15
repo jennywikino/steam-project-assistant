@@ -1,5 +1,10 @@
 # CHANGELOG
 
+## V0.6.21.1
+
+- 修正 SteamDB 导入重复 AppID 合并逻辑：`AppID {appid}` 占位游戏名可被真实 Steam 游戏名补全。
+- 保持真实人工填写游戏名和 stage / priority / owner_note / reject_reason 不被覆盖。
+
 ## V0.6.21
 
 - 新增 SteamDB 导入页的 AppID 基础信息补全。
