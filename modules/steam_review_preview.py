@@ -54,12 +54,12 @@ def get_steam_review_preview(
 def build_steam_review_preview_markdown_section(review_result: dict | None) -> str:
     result = _normalize_result(review_result or {})
     groups = [
-        ("最近评论", result.get("recent_reviews", [])),
-        ("有价值评论", result.get("helpful_reviews", [])),
-        ("最近差评", result.get("negative_reviews", [])),
+        ("最近中文评论", result.get("recent_reviews", [])),
+        ("高价值评论", result.get("helpful_reviews", [])),
+        ("差评样本", result.get("negative_reviews", [])),
     ]
     if not any(items for _, items in groups):
-        return "## Steam 评论预览\n\n暂无评论预览，可能是接口无返回或项目暂无公开评论。\n"
+        return "## Steam 评论预览\n\n暂无中文评论样本，可打开 Steam 评论页人工查看。\n"
 
     summary = result.get("summary", {}) if isinstance(result.get("summary"), dict) else {}
     lines = ["## Steam 评论预览", ""]
@@ -78,7 +78,7 @@ def build_steam_review_preview_markdown_section(review_result: dict | None) -> s
             vote = "推荐" if item.get("voted_up") else "不推荐"
             lines.append(f"- {vote} · {item.get('created_at') or '未获取'} · 游玩 {format_playtime(item.get('author_playtime_at_review') or item.get('author_playtime_forever'))}")
             lines.append(f"  - 点赞：{_display(item.get('votes_up'))}")
-            lines.append(f"  - 正文：{_display(item.get('review_preview') or item.get('review'))}")
+            lines.append(f"  - 正文：{_display(item.get('review_preview') or item.get('review'))[:200]}")
             url = str(item.get("review_url", "") or "").strip()
             if url:
                 lines.append(f"  - 链接：{url}")

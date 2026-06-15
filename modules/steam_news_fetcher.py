@@ -13,6 +13,18 @@ from urllib.request import Request, urlopen
 STEAM_NEWS_API_URL = "https://api.steampowered.com/ISteamNews/GetNewsForApp/v0002/"
 REQUEST_TIMEOUT_SECONDS = 10
 CACHE_TTL_HOURS = 6
+MAJOR_UPDATE_KEYWORDS = [
+    "update",
+    "version",
+    "patch",
+    "major",
+    "anniversary",
+    "new content",
+    "release",
+    "launch",
+    "demo",
+    "playtest",
+]
 
 
 def get_steam_news_for_app(
@@ -54,17 +66,19 @@ def build_steam_news_markdown_section(news_result: dict | None) -> str:
     if not items:
         return "## Steam 动态 / 公告\n\n暂无 Steam 动态记录，可能是接口无返回或项目未发布公告。\n"
 
-    lines = ["## Steam 动态 / 公告", ""]
-    for item in items:
+    lines = ["## Steam 近期动态", ""]
+    for item in items[:3]:
         title = _display(item.get("title"))
         date = _display(item.get("readable_date") or item.get("date"))
         source = _display(item.get("feedlabel") or item.get("feedname"))
         summary = _display(item.get("clean_summary") or item.get("summary") or item.get("contents"))
         url = str(item.get("url", "") or "").strip()
+        major_label = "重大更新候选" if item.get("is_major_update_candidate") else "普通动态"
         lines.append(f"- {title}")
         lines.append(f"  - 日期：{date}")
-        lines.append(f"  - 来源：{source}")
-        lines.append(f"  - 摘要：{summary}")
+        lines.append(f"  - 类型 / feedname：{source}")
+        lines.append(f"  - 标记：{major_label}")
+        lines.append(f"  - 摘要：{_truncate(summary, 200)}")
         if url:
             lines.append(f"  - 链接：{url}")
     lines.append("")
@@ -125,6 +139,8 @@ def _normalize_news_item(item: dict, maxlength: int = 500) -> dict:
     except (TypeError, ValueError, OSError):
         date_text = str(timestamp or "")
     raw_contents = str(item.get("contents") or "")
+    clean_summary = clean_steam_news_text(raw_contents, max_length=350)
+    is_major = is_major_update_candidate(item.get("title"), raw_contents)
     return {
         "gid": str(item.get("gid", "") or ""),
         "title": _clean_text(item.get("title"), 180),
@@ -132,7 +148,8 @@ def _normalize_news_item(item: dict, maxlength: int = 500) -> dict:
         "is_external_url": bool(item.get("is_external_url", False)),
         "author": _clean_text(item.get("author"), 80),
         "contents": clean_steam_news_text(raw_contents, max_length=maxlength),
-        "clean_summary": clean_steam_news_text(raw_contents, max_length=350),
+        "clean_summary": clean_summary,
+        "is_major_update_candidate": is_major,
         "raw_contents": raw_contents[:2000],
         "feedlabel": _clean_text(item.get("feedlabel"), 80),
         "date": date_text,
@@ -149,6 +166,7 @@ def _normalize_result(result: dict) -> dict:
         for item in items:
             if isinstance(item, dict):
                 raw_contents = str(item.get("raw_contents") or item.get("contents") or item.get("clean_summary") or item.get("summary") or "")
+                clean_summary = clean_steam_news_text(raw_contents, max_length=350)
                 normalized_items.append(
                     {
                         "gid": str(item.get("gid", "") or ""),
@@ -157,8 +175,9 @@ def _normalize_result(result: dict) -> dict:
                         "is_external_url": bool(item.get("is_external_url", False)),
                         "author": _clean_text(item.get("author"), 80),
                         "contents": clean_steam_news_text(raw_contents, max_length=500),
-                        "clean_summary": clean_steam_news_text(raw_contents, max_length=350),
+                        "clean_summary": clean_summary,
                         "raw_contents": raw_contents[:2000],
+                        "is_major_update_candidate": bool(item.get("is_major_update_candidate")) or is_major_update_candidate(item.get("title"), raw_contents),
                         "feedlabel": _clean_text(item.get("feedlabel"), 80),
                         "date": _clean_text(item.get("date"), 40),
                         "readable_date": _clean_text(item.get("readable_date") or item.get("date"), 40),
@@ -215,6 +234,18 @@ def clean_steam_news_text(text: str, max_length: int = 500) -> str:
     if len(clean) > max_length:
         return clean[: max(0, max_length - 1)].rstrip() + "..."
     return clean
+
+
+def is_major_update_candidate(title, content) -> bool:
+    text = f"{title or ''} {content or ''}".casefold()
+    return any(keyword in text for keyword in MAJOR_UPDATE_KEYWORDS)
+
+
+def _truncate(value: str, max_length: int) -> str:
+    text = str(value or "").strip()
+    if len(text) <= max_length:
+        return text
+    return text[: max(0, max_length - 1)].rstrip() + "..."
 
 
 def _clean_text(value, maxlength: int) -> str:

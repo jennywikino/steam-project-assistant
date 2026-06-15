@@ -28,6 +28,7 @@ from modules.genre_signal_extractor import GenreSignals, extract_genre_signals, 
 
 PLACEHOLDER = "未获取/需人工确认"
 FINAL_LIMITATION_TEXT = "基于公开信息生成，需试玩复核。"
+MISSING_VALUE_TEXTS = {"", "未获取", "未确认", "暂无", "None", "nan", "[]", PLACEHOLDER}
 
 TRACK_RULES = {
     "roguelite": "Roguelite/Roguelike 赛道竞争：需确认局外成长、随机构筑和单局反馈是否足够强。",
@@ -115,7 +116,8 @@ def generate_project_profile(
         "评测摘要": _value(info.get("review_score_desc") or info.get("review_stats_status")),
         "中位游玩时间": _value(_format_hours(info.get("median_playtime_hours"))),
         "平均游玩时间": _value(_format_hours(info.get("avg_playtime_hours"))),
-        "是否有 Demo": _value(info.get("has_demo") or user_has_demo),
+        "是否有 Demo": normalize_availability_status(info.get("has_demo") or user_has_demo),
+        "是否有 Playtest": normalize_availability_status(info.get("has_playtest")),
         "是否已试玩": _value(user_demo_played),
         "是否支持简中": _value(info.get("has_simplified_chinese")),
         "类型/标签": _value(", ".join(all_tags)),
@@ -227,6 +229,124 @@ def _assess_data_quality(info: dict, tags: list[str], user_demo_played: str = ""
     return "low"
 
 
+def build_project_data_status(
+    profile: ProjectProfile,
+    market_data_records: pd.DataFrame | None = None,
+    steam_news_result: dict | None = None,
+    steam_review_preview_result: dict | None = None,
+) -> dict[str, Any]:
+    """Return a compact status summary for profile data blocks."""
+    info = profile.raw_store_info or {}
+    basic_missing = []
+    for label, value in [
+        ("游戏名", profile.basic_info.get("游戏名") or info.get("name") or info.get("game_name")),
+        ("开发商", profile.basic_info.get("开发商") or info.get("developer")),
+        ("发行商", profile.basic_info.get("发行商") or info.get("publisher")),
+        ("发售状态", profile.basic_info.get("发售状态") or info.get("release_status") or info.get("release_date")),
+        ("标签", profile.basic_info.get("类型/标签") or info.get("genres") or info.get("tags")),
+        ("简中", profile.basic_info.get("是否支持简中") or info.get("has_simplified_chinese") or info.get("supports_schinese")),
+    ]:
+        if not _has_data_value(value):
+            basic_missing.append(label)
+    basic_status = "已获取" if not basic_missing else ("部分缺失" if len(basic_missing) < 5 else "获取失败")
+
+    screenshots = info.get("screenshots") if isinstance(info.get("screenshots"), list) else []
+    movies = info.get("movies") if isinstance(info.get("movies"), list) else []
+    has_media = bool(info.get("header_image") or info.get("image_url") or screenshots or movies or _to_int(info.get("screenshots_count")) > 0 or _to_int(info.get("movies_count")) > 0)
+    media_status = "已获取" if has_media else "未获取"
+
+    review_status = _profile_review_data_status(info, steam_review_preview_result)
+    news_status = _profile_news_data_status(steam_news_result)
+    market_status = "已录入" if market_data_records is not None and not market_data_records.empty else "未录入"
+    demo_status = normalize_availability_status(info.get("has_demo") or profile.basic_info.get("是否有 Demo"))
+    playtest_status = normalize_availability_status(info.get("has_playtest") or profile.basic_info.get("是否有 Playtest"))
+
+    missing_items = []
+    if basic_status != "已获取":
+        missing_items.append("基础信息")
+    if media_status != "已获取":
+        missing_items.append("商店素材")
+    if review_status != "已获取":
+        missing_items.append("评论")
+    if news_status != "已获取":
+        missing_items.append("公告")
+    if market_status != "已录入":
+        missing_items.append("第三方市场")
+    if demo_status == "未确认":
+        missing_items.append("Demo 状态")
+    if playtest_status == "未确认":
+        missing_items.append("Playtest 状态")
+
+    if basic_status == "已获取" and media_status == "已获取" and review_status == "已获取" and len(missing_items) <= 2:
+        completeness = "高"
+    elif basic_status in {"已获取", "部分缺失"} and (media_status == "已获取" or review_status == "已获取"):
+        completeness = "中"
+    else:
+        completeness = "低"
+
+    cache_times = [
+        str(info.get("updated_at") or info.get("fetched_at") or ""),
+        str((steam_news_result or {}).get("fetched_at", "") or ""),
+        str((steam_review_preview_result or {}).get("fetched_at", "") or ""),
+    ]
+    if market_data_records is not None and not market_data_records.empty and "updated_at" in market_data_records.columns:
+        cache_times.append(str(market_data_records.iloc[0].get("updated_at", "") or ""))
+    last_updated_at = max([item for item in cache_times if item], default="")
+    return {
+        "基础信息": basic_status,
+        "商店素材": media_status,
+        "评论数据": review_status,
+        "Steam 动态": news_status,
+        "第三方市场": market_status,
+        "Demo": demo_status,
+        "Playtest": playtest_status,
+        "数据完整度": completeness,
+        "缺失项": "、".join(missing_items) if missing_items else "无明显缺失",
+        "最后更新时间": last_updated_at or "未记录",
+        "需人工复核": "是" if missing_items or completeness != "高" else "否",
+    }
+
+
+def normalize_availability_status(value) -> str:
+    text = str(value or "").strip()
+    if not text or text in {"未获取", "未确认", "None", "nan", "[]", PLACEHOLDER}:
+        return "未确认"
+    lowered = text.casefold()
+    if text in {"是", "有", "已确认"} or lowered in {"yes", "true", "1", "available"}:
+        return "有"
+    if text in {"否", "无"} or lowered in {"no", "false", "0", "none"}:
+        return "无"
+    if "人工" in text:
+        base = "有" if any(token in text for token in ["是", "有"]) else ("无" if any(token in text for token in ["否", "无"]) else "未确认")
+        return f"{base}（人工确认）"
+    return text if text in {"有", "无", "未确认"} else "未确认"
+
+
+def _has_data_value(value) -> bool:
+    return str(value or "").strip() not in MISSING_VALUE_TEXTS
+
+
+def _profile_review_data_status(info: dict, review_result: dict | None) -> str:
+    status = str((review_result or {}).get("status", "") or "").strip()
+    if status in {"已获取", "使用缓存", "使用旧缓存"} and any((review_result or {}).get(key) for key in ["recent_reviews", "helpful_reviews", "negative_reviews"]):
+        return "已获取"
+    if status == "获取失败":
+        return "获取失败"
+    if _to_int(info.get("review_total")) > 0:
+        return "已获取"
+    return "暂无评论"
+
+
+def _profile_news_data_status(news_result: dict | None) -> str:
+    status = str((news_result or {}).get("status", "") or "").strip()
+    items = (news_result or {}).get("items", []) if isinstance(news_result, dict) else []
+    if status in {"success", "cache", "stale_cache"} and items:
+        return "已获取"
+    if status in {"error", "invalid"}:
+        return "获取失败"
+    return "暂无动态"
+
+
 def _markdown_quick_screening(profile: ProjectProfile) -> str:
     level = profile.data_quality_level or "low"
     has_reviews = _to_int((profile.raw_store_info or {}).get("review_total")) >= 10
@@ -304,6 +424,26 @@ def profile_to_markdown(
     market_data_section = build_market_data_markdown_section(market_data_records)
     steam_news_section = build_steam_news_markdown_section(steam_news_result)
     steam_review_preview_section = build_steam_review_preview_markdown_section(steam_review_preview_result)
+    data_status = build_project_data_status(
+        profile,
+        market_data_records=market_data_records,
+        steam_news_result=steam_news_result,
+        steam_review_preview_result=steam_review_preview_result,
+    )
+    data_status_section = "\n".join(
+        [
+            "## 数据状态",
+            f"- 基础信息：{data_status['基础信息']}",
+            f"- 商店素材：{data_status['商店素材']}",
+            f"- 评论数据：{data_status['评论数据']}",
+            f"- Steam 动态：{data_status['Steam 动态']}",
+            f"- 第三方市场：{data_status['第三方市场']}",
+            f"- 数据完整度：{data_status['数据完整度']}",
+            f"- 缺失项：{data_status['缺失项']}",
+            f"- 最后更新时间：{data_status['最后更新时间']}",
+            "",
+        ]
+    )
     quick_capture_note = str(info.get("quick_capture_note", "") or "").strip()
     source_note_section = f"\n## 3. 来源备注\n- {quick_capture_note}\n" if quick_capture_note else ""
     return f"""# {game_name} 项目画像草稿
@@ -328,6 +468,7 @@ def profile_to_markdown(
 - 视频数量：{profile.basic_info.get("视频/Trailer 数量", PLACEHOLDER)}
 - 短描述：{_value(info.get("short_description"))}
 
+{data_status_section}
 {steam_news_section}
 {steam_review_preview_section}
 {source_note_section}
