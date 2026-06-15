@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## V0.7.0
+
+- 新增候选池 Excel 多 Sheet 导出，输出到 `exports/candidate_pool_v070_YYYYMMDD_HHMM.xlsx`。
+- 新增“今日日报”Sheet，便于直接复制发行初筛摘要。
+- 工具从“查询 / 候选池”进入“可交付输出版”。
+- 本版暂不做 API / 网站 / AI，不新增外部数据源。
+
 ## V0.6.22-P0
 
 - 新增本地发行判断规则库 `modules/publishing_rules.py`。

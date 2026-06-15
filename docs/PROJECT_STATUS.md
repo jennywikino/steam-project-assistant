@@ -3,10 +3,16 @@
 ## 当前项目状态
 
 - 项目名称：Steam 项目初筛助手
-- 当前版本：V0.6.21 SteamDB AppID 基础信息补全
-- 当前定位：本地 Steam 项目初筛工作台
+- 当前版本：V0.7.0 可用输出版
+- 当前定位：本地 Steam 项目初筛与交付输出工作台
 
 ## 当前已完成
+V0.7.0 可用输出版：
+- 新增候选池 Excel 多 Sheet 导出。
+- 新增今日日报 Sheet。
+- 工具从“查询 / 候选池”进入“可交付输出版”。
+- 暂不做 API / 网站 / AI。
+
 V0.6.21 SteamDB AppID 基础信息补全：
 - 新增 SteamDB 导入页的 AppID 基础信息补全。
 - 支持缓存 Steam 基础信息到 `data/cache/steam_appdetails_cache.json`。

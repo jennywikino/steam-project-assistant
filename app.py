@@ -21,6 +21,7 @@ from modules.candidate_pool import (
     candidate_pool_summary,
     export_daily_candidate_report,
     export_candidate_pool_to_excel,
+    export_candidate_pool_v070_to_excel,
     filter_candidate_pool,
     find_candidate_by_appid,
     ensure_candidate_pool_csv_exists,
@@ -4211,6 +4212,23 @@ def render_project_candidate_pool_section() -> None:
         use_container_width=True,
         hide_index=True,
     )
+
+    st.caption("导出前提醒：请确认 PUBG / Apex / Rust / CS2 等是否只是测试数据。")
+    if st.button("导出 V0.7 候选池 Excel", key="candidate_pool_export_v070", use_container_width=True):
+        try:
+            export_result = export_candidate_pool_v070_to_excel(CANDIDATE_POOL_CSV_PATH, BASE_DIR / "exports")
+        except Exception as exc:
+            st.error(f"导出 V0.7 候选池 Excel 失败：{exc}")
+        else:
+            st.success(f"V0.7 候选池 Excel 已导出：{export_result['path']}")
+            result_cols = st.columns(6)
+            result_cols[0].metric("Sheet 数量", export_result["sheet_count"])
+            result_cols[1].metric("总候选数", export_result["total_count"])
+            result_cols[2].metric("待试玩", export_result["playable_count"])
+            result_cols[3].metric("值得联系", export_result["contact_count"])
+            result_cols[4].metric("竞品参考", export_result["competitor_count"])
+            result_cols[5].metric("资料不足", export_result["insufficient_count"])
+            st.caption(f"暂缓 / 放弃数量：{export_result['paused_rejected_count']}")
 
     action_cols = st.columns([1, 1, 1, 2])
     if action_cols[0].button("导出候选清单", key="candidate_pool_export", use_container_width=True):
@@ -9536,7 +9554,7 @@ def render_docs_status_page() -> None:
     st.subheader("文档与状态")
     st.markdown(
         """
-- 当前版本：V0.6.21 SteamDB AppID 基础信息补全
+- 当前版本：V0.7.0 可用输出版
 - 数据文件：`data/projects.csv`、`data/candidate_pool.csv`、`data/competitors.csv`、`data/competitor_candidates.csv`、`data/external_intel.csv`
 - 图片目录：`data/snapshots/`
 - 报告目录：`reports/markdown/`、`reports/txt/`、`reports/excel/`、`reports/profile/`
@@ -9572,7 +9590,7 @@ def main() -> None:
     st.set_page_config(page_title="Steam 项目初筛助手", layout="wide")
 
     st.sidebar.title("Steam 项目初筛助手")
-    st.sidebar.info("当前版本：V0.6.21 SteamDB AppID 基础信息补全")
+    st.sidebar.info("当前版本：V0.7.0 可用输出版")
     st.sidebar.warning(
         "退出提醒\n\n"
         "- 关闭浏览器标签页不会关闭后台服务。\n"
@@ -9583,7 +9601,7 @@ def main() -> None:
         st.sidebar.code("停止_项目初筛助手.bat", language="bat")
 
     st.title("Steam 项目初筛助手")
-    st.caption("当前版本支持 SteamDB 粘贴导入、解析预览、AppID 基础信息补全和候选池导入。")
+    st.caption("当前版本支持 SteamDB 导入、候选池、基础信息补全和 V0.7 Excel 输出版。")
 
     home_tab, workflow_tab, quick_tab, profile_tab, steamdb_tab, steamdb_import_tab, search_tab, demo_tab, competitor_tab, history_tab, docs_tab = st.tabs(
         ["首页 / 今日看板", "今日工作流", "快速记录", "一键项目画像", "SteamDB 发现", "SteamDB 导入", "搜索中心", "Demo 试玩", "竞品与候选", "历史与导出", "文档与状态"]
