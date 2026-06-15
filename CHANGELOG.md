@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## V0.6.21
+
+- 新增 SteamDB 导入页的 AppID 基础信息补全。
+- 支持缓存 Steam 基础信息到 `data/cache/steam_appdetails_cache.json`。
+- 发送候选池时优先使用补全后的基础字段。
+- 补全失败不影响 AppID-only 入池流程。
+
 ## V0.6.20
 
 - 项目画像数据概览改为缩框摘要，展开后保留完整字段。

@@ -3,10 +3,16 @@
 ## 当前项目状态
 
 - 项目名称：Steam 项目初筛助手
-- 当前版本：V0.6.20 SteamDB 工作流桥接
+- 当前版本：V0.6.21 SteamDB AppID 基础信息补全
 - 当前定位：本地 Steam 项目初筛工作台
 
 ## 当前已完成
+V0.6.21 SteamDB AppID 基础信息补全：
+- 新增 SteamDB 导入页的 AppID 基础信息补全。
+- 支持缓存 Steam 基础信息到 `data/cache/steam_appdetails_cache.json`。
+- 发送候选池时优先使用补全后的基础字段。
+- 补全失败不影响 AppID-only 入池流程。
+
 
 V0.6.20 SteamDB 工作流桥接：
 - 项目画像数据概览改为缩框摘要。
@@ -111,6 +117,14 @@ V0.6.10 开发商本体调查窗口：
 33. V0.6.18 日常工作流收束
 34. V0.6.19-data 项目数据层补齐
 35. V0.6.20 SteamDB 工作流桥接
+36. V0.6.21 SteamDB AppID 基础信息补全
+
+## V0.6.21 更新
+
+- 新增 SteamDB 导入页的 AppID 基础信息补全。
+- 支持缓存 Steam 基础信息到 `data/cache/steam_appdetails_cache.json`。
+- 发送候选池时优先使用补全后的基础字段。
+- 补全失败不影响 AppID-only 入池流程。
 
 ## V0.6.20 更新
 

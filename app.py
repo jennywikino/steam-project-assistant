@@ -195,6 +195,7 @@ from modules.steam_appdetails_cache import (
     get_cached_appdetails_summary,
     load_cached_appdetails_summaries,
 )
+from modules.steam_app_enricher import enrich_appids_basic
 from modules.steam_data_normalizer import normalize_steam_game_data
 from modules.steam_review_stats import get_cached_review_stats
 from modules.steam_store_feed_fetcher import (
@@ -473,11 +474,18 @@ def upsert_steamdb_paste_candidate(row: dict) -> str:
 
     steam_url = clean_candidate_value(row.get("steam_url")) or steam_url_from_appid(appid)
     steamdb_url = clean_candidate_value(row.get("steamdb_url")) or steamdb_app_url_from_appid(appid)
+    row_source_notes = clean_candidate_value(row.get("source_notes"))
+    source_notes = "来自 SteamDB 导入"
+    if row_source_notes:
+        source_notes = f"{source_notes}；{row_source_notes}"
     incoming = {
         "appid": appid,
         "game_name": game_name,
         "steam_url": steam_url,
         "steamdb_url": steamdb_url,
+        "developer": clean_candidate_value(row.get("developer")),
+        "publisher": clean_candidate_value(row.get("publisher")),
+        "release_status": clean_candidate_value(row.get("release_status") or row.get("release_date")),
         "steamdb_rank": clean_candidate_value(row.get("rank") or row.get("steamdb_rank")),
         "steamdb_followers": clean_candidate_value(row.get("followers") or row.get("steamdb_followers")),
         "review_count": clean_candidate_value(row.get("reviews") or row.get("review_count")),
@@ -486,13 +494,15 @@ def upsert_steamdb_paste_candidate(row: dict) -> str:
         "review_score": clean_candidate_value(row.get("rating") or row.get("review_score")),
         "price": clean_candidate_value(row.get("price")),
         "release_date": clean_candidate_value(row.get("release_date")),
+        "has_demo": clean_candidate_value(row.get("has_demo")),
+        "supports_schinese": clean_candidate_value(row.get("supports_schinese")),
         "source": "SteamDB Paste",
-        "source_url": steamdb_url,
+        "source_url": steamdb_url or steam_url,
         "next_action": "补项目画像",
         "stage": "新发现",
         "priority": "未定",
-        "source_notes": "来自 SteamDB 导入",
     }
+    incoming["source_notes"] = source_notes
 
     existing = find_candidate_by_appid(CANDIDATE_POOL_CSV_PATH, appid) if appid else {}
     if existing:
@@ -501,6 +511,12 @@ def upsert_steamdb_paste_candidate(row: dict) -> str:
             "game_name",
             "steam_url",
             "steamdb_url",
+            "developer",
+            "publisher",
+            "release_status",
+            "release_date",
+            "has_demo",
+            "supports_schinese",
             "steamdb_rank",
             "steamdb_followers",
             "review_count",
@@ -508,7 +524,6 @@ def upsert_steamdb_paste_candidate(row: dict) -> str:
             "steamdb_peak_ccu",
             "review_score",
             "price",
-            "release_date",
             "source",
             "source_url",
             "next_action",
@@ -521,6 +536,9 @@ def upsert_steamdb_paste_candidate(row: dict) -> str:
         current_notes = clean_candidate_value(existing.get("source_notes"))
         if "SteamDB 导入" not in current_notes:
             updates["source_notes"] = f"{current_notes}；来自 SteamDB 导入" if current_notes else "来自 SteamDB 导入"
+        incoming_notes = clean_candidate_value(incoming.get("source_notes"))
+        if incoming_notes and incoming_notes not in current_notes:
+            updates["source_notes"] = append_note_text(current_notes, incoming_notes)
         update_candidate_pool_fields(CANDIDATE_POOL_CSV_PATH, appid=appid, updates=updates)
         return "updated"
 
@@ -529,9 +547,14 @@ def upsert_steamdb_paste_candidate(row: dict) -> str:
         game_name=game_name,
         steam_url=steam_url,
         steamdb_url=steamdb_url,
+        developer=incoming["developer"],
+        publisher=incoming["publisher"],
+        release_status=incoming["release_status"],
         price=incoming["price"],
         review_score=incoming["review_score"],
         review_count=incoming["review_count"],
+        has_demo=incoming["has_demo"],
+        supports_schinese=incoming["supports_schinese"],
         source=incoming["source"],
         source_url=incoming["source_url"],
         priority=incoming["priority"],
@@ -543,7 +566,6 @@ def upsert_steamdb_paste_candidate(row: dict) -> str:
         peak_ccu=incoming["peak_ccu"],
         source_notes=incoming["source_notes"],
         release_date=incoming["release_date"],
-        release_status=incoming["release_date"],
     )
     upsert_candidate_pool_record(record, CANDIDATE_POOL_CSV_PATH)
     return "created"
@@ -8655,10 +8677,79 @@ def render_steamdb_import_page() -> None:
     render_steamdb_list_watch_note_section(results)
 
 
+def enrich_steamdb_paste_results_basic_info(results: list[dict]) -> tuple[list[dict], dict]:
+    appids = []
+    seen = set()
+    for row in results:
+        appid = clean_candidate_value(row.get("appid"))
+        if appid and appid not in seen:
+            appids.append(appid)
+            seen.add(appid)
+
+    enriched = enrich_appids_basic(appids)
+    stats = {
+        "pending": len(appids),
+        "success": 0,
+        "cache_hit": 0,
+        "failed": 0,
+        "cache_warning": "",
+    }
+    output = []
+    for row in results:
+        updated = dict(row)
+        appid = clean_candidate_value(row.get("appid"))
+        if not appid:
+            output.append(updated)
+            continue
+
+        info = enriched.get(appid, {})
+        if info.get("cache_warning") and not stats["cache_warning"]:
+            stats["cache_warning"] = str(info.get("cache_warning") or "")
+        if info.get("cache_hit"):
+            stats["cache_hit"] += 1
+        if info.get("success"):
+            stats["success"] += 1
+            for field in [
+                "game_name",
+                "steam_url",
+                "developer",
+                "publisher",
+                "release_date",
+                "release_status",
+                "price",
+                "review_score",
+                "review_count",
+                "has_demo",
+                "supports_schinese",
+            ]:
+                value = clean_candidate_value(info.get(field))
+                if value:
+                    updated[field] = value
+            updated["source_notes"] = append_note_text(updated.get("source_notes"), info.get("source_notes"))
+            updated["parse_notes"] = append_note_text(updated.get("parse_notes"), "Steam basic info enriched")
+        else:
+            stats["failed"] += 1
+            updated["steam_url"] = clean_candidate_value(updated.get("steam_url")) or clean_candidate_value(info.get("steam_url")) or steam_url_from_appid(appid)
+            updated["parse_notes"] = append_note_text(updated.get("parse_notes"), "Steam 基础信息补全失败 / 需人工复核")
+            updated["source_notes"] = append_note_text(updated.get("source_notes"), info.get("source_notes"))
+        output.append(updated)
+    return output, stats
+
+
+def append_note_text(current, note) -> str:
+    current_text = clean_candidate_value(current)
+    note_text = clean_candidate_value(note)
+    if not note_text:
+        return current_text
+    if note_text in current_text:
+        return current_text
+    return f"{current_text}；{note_text}" if current_text else note_text
+
+
 def render_steamdb_paste_results(results: list[dict]) -> None:
     st.markdown("### 解析结果预览")
     option_labels = [_steamdb_import_option_label(index, row) for index, row in enumerate(results)]
-    select_cols = st.columns(5)
+    select_cols = st.columns(6)
     if select_cols[0].button("全选高可信", key="steamdb_select_high", use_container_width=True):
         st.session_state["steamdb_paste_selected_labels"] = [
             label
@@ -8677,6 +8768,32 @@ def render_steamdb_paste_results(results: list[dict]) -> None:
         export_path = export_steamdb_parse_results_csv(results)
         st.success(f"解析结果已导出：{export_path}")
 
+    if select_cols[4].button("补全 Steam 基础信息", key="steamdb_enrich_basic_info", use_container_width=True):
+        previous_selected = st.session_state.get("steamdb_paste_selected_labels", [])
+        selected_index_before = {option_labels.index(label) for label in previous_selected if label in option_labels}
+        enriched_results, stats = enrich_steamdb_paste_results_basic_info(results)
+        st.session_state["steamdb_paste_results"] = enriched_results
+        refreshed_labels = [_steamdb_import_option_label(index, row) for index, row in enumerate(enriched_results)]
+        st.session_state["steamdb_paste_selected_labels"] = [
+            refreshed_labels[index]
+            for index in selected_index_before
+            if index < len(refreshed_labels)
+        ]
+        st.session_state["steamdb_paste_enrich_stats"] = stats
+        st.rerun()
+
+    enrich_stats = st.session_state.get("steamdb_paste_enrich_stats", {})
+    if enrich_stats:
+        st.info(
+            "Steam 基础信息补全："
+            f"待补全 {enrich_stats.get('pending', 0)}，"
+            f"成功 {enrich_stats.get('success', 0)}，"
+            f"缓存命中 {enrich_stats.get('cache_hit', 0)}，"
+            f"失败 {enrich_stats.get('failed', 0)}"
+        )
+        if enrich_stats.get("cache_warning"):
+            st.warning(str(enrich_stats.get("cache_warning")))
+
     selected_labels = st.multiselect(
         "选择要导入候选池的记录",
         option_labels,
@@ -8691,13 +8808,19 @@ def render_steamdb_paste_results(results: list[dict]) -> None:
                 "是否选择": "是" if index in selected_index else "",
                 "游戏名": row.get("game_name", ""),
                 "AppID": row.get("appid", ""),
+                "Developer": row.get("developer", ""),
+                "Publisher": row.get("publisher", ""),
                 "Rank": row.get("rank", ""),
                 "Followers": row.get("followers", ""),
                 "Reviews": row.get("reviews", ""),
                 "Peak": row.get("peak_ccu", ""),
                 "Rating": row.get("rating", ""),
                 "Release": row.get("release_date", ""),
+                "Release Status": row.get("release_status", ""),
                 "Price": row.get("price", ""),
+                "Demo": row.get("has_demo", ""),
+                "简中": row.get("supports_schinese", ""),
+                "Steam": row.get("steam_url", ""),
                 "解析可信度": row.get("parse_confidence", ""),
                 "解析备注": row.get("parse_notes", ""),
             }
@@ -8705,7 +8828,7 @@ def render_steamdb_paste_results(results: list[dict]) -> None:
     st.dataframe(pd.DataFrame(preview_rows), use_container_width=True, hide_index=True)
 
     selected_rows = [row for index, row in enumerate(results) if index in selected_index]
-    if select_cols[4].button("发送选中项到候选池", key="steamdb_import_selected_candidates", use_container_width=True):
+    if select_cols[5].button("发送选中项到候选池", key="steamdb_import_selected_candidates", use_container_width=True):
         if not selected_rows:
             st.warning("请先选择至少一条记录。")
         else:
@@ -9395,7 +9518,7 @@ def render_docs_status_page() -> None:
     st.subheader("文档与状态")
     st.markdown(
         """
-- 当前版本：V0.6.20 SteamDB 工作流桥接
+- 当前版本：V0.6.21 SteamDB AppID 基础信息补全
 - 数据文件：`data/projects.csv`、`data/candidate_pool.csv`、`data/competitors.csv`、`data/competitor_candidates.csv`、`data/external_intel.csv`
 - 图片目录：`data/snapshots/`
 - 报告目录：`reports/markdown/`、`reports/txt/`、`reports/excel/`、`reports/profile/`
@@ -9431,7 +9554,7 @@ def main() -> None:
     st.set_page_config(page_title="Steam 项目初筛助手", layout="wide")
 
     st.sidebar.title("Steam 项目初筛助手")
-    st.sidebar.info("当前版本：V0.6.20 SteamDB 工作流桥接")
+    st.sidebar.info("当前版本：V0.6.21 SteamDB AppID 基础信息补全")
     st.sidebar.warning(
         "退出提醒\n\n"
         "- 关闭浏览器标签页不会关闭后台服务。\n"
@@ -9442,7 +9565,7 @@ def main() -> None:
         st.sidebar.code("停止_项目初筛助手.bat", language="bat")
 
     st.title("Steam 项目初筛助手")
-    st.caption("当前版本桥接 SteamDB 粘贴导入、解析预览、候选池导入和榜单观察记录。")
+    st.caption("当前版本支持 SteamDB 粘贴导入、解析预览、AppID 基础信息补全和候选池导入。")
 
     home_tab, workflow_tab, quick_tab, profile_tab, steamdb_tab, steamdb_import_tab, search_tab, demo_tab, competitor_tab, history_tab, docs_tab = st.tabs(
         ["首页 / 今日看板", "今日工作流", "快速记录", "一键项目画像", "SteamDB 发现", "SteamDB 导入", "搜索中心", "Demo 试玩", "竞品与候选", "历史与导出", "文档与状态"]
