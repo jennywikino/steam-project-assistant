@@ -4415,11 +4415,13 @@ def run_candidate_pool_bulk_enrich(candidates: pd.DataFrame) -> dict:
                 }
                 and str(value or "").strip()
             }
+            if str(row_dict.get("next_action", "") or "").strip():
+                updates.pop("next_action", None)
             suggested_row = {**row_dict, **updates}
             suggestion, reason = build_candidate_pool_auto_suggestion(suggested_row)
             updates["auto_suggestion"] = suggestion
             updates["auto_reason"] = reason
-            if not enriched:
+            if not enriched and not str(row_dict.get("next_action", "") or "").strip():
                 updates["next_action"] = "补项目画像"
             update_candidate_pool_fields(CANDIDATE_POOL_CSV_PATH, candidate_id=candidate_id, appid=appid, updates=updates)
             if enriched:

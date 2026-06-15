@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## V0.6.22-P0
+
+- 新增本地发行判断规则库 `modules/publishing_rules.py`。
+- 候选池自动建议基于本地字段刷新，并保留人工状态字段。
+- 规则建议不自动覆盖 stage / priority / owner_note / reject_reason / is_archived。
+
 ## V0.6.21.1
 
 - 修正 SteamDB 导入重复 AppID 合并逻辑：`AppID {appid}` 占位游戏名可被真实 Steam 游戏名补全。

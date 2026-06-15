@@ -6,6 +6,8 @@ from uuid import uuid4
 
 import pandas as pd
 
+from modules.publishing_rules import evaluate_publishing_candidate
+
 
 STAGE_OPTIONS = [
     "新发现",
@@ -479,7 +481,7 @@ def parse_appid_from_text(text: str) -> str:
 def apply_auto_suggestions(data: pd.DataFrame) -> pd.DataFrame:
     output = data.copy()
     if output.empty:
-        for column in ["auto_suggestion", "auto_reason"]:
+        for column in ["auto_suggestion", "auto_reason", "next_action"]:
             if column not in output.columns:
                 output[column] = ""
         return output
@@ -488,16 +490,23 @@ def apply_auto_suggestions(data: pd.DataFrame) -> pd.DataFrame:
             output[column] = ""
     suggestions = []
     reasons = []
+    next_actions = []
     for _, row in output.iterrows():
-        suggestion, reason = build_auto_suggestion(row.to_dict())
-        suggestions.append(suggestion)
-        reasons.append(reason)
+        rule_result = evaluate_publishing_candidate(row.to_dict())
+        suggestions.append(str(rule_result.get("auto_suggestion", "") or ""))
+        reasons.append(str(rule_result.get("auto_reason", "") or ""))
+        current_next_action = str(row.get("next_action", "") or "").strip()
+        next_actions.append(current_next_action or str(rule_result.get("next_action", "") or ""))
     output["auto_suggestion"] = suggestions
     output["auto_reason"] = reasons
+    output["next_action"] = next_actions
     return output
 
 
 def build_auto_suggestion(row: dict) -> tuple[str, str]:
+    result = evaluate_publishing_candidate(row)
+    return str(result.get("auto_suggestion", "") or ""), str(result.get("auto_reason", "") or "")
+
     developer = _clean_rule_value(row.get("developer"))
     publisher = _clean_rule_value(row.get("publisher"))
     genres = _clean_rule_value(row.get("genres_tags"))
@@ -539,6 +548,12 @@ def build_auto_suggestion(row: dict) -> tuple[str, str]:
 
 def apply_suggestion_to_stage(suggestion: str) -> dict:
     mapping = {
+        "待补资料": {"stage": "待补资料", "priority": "未定", "next_action": "补项目画像"},
+        "暂缓": {"stage": "暂缓", "priority": "低", "next_action": "作为竞品参考"},
+        "竞品参考": {"stage": "待开发商调查", "priority": "低", "next_action": "查发行合作空间"},
+        "值得联系": {"stage": "值得联系", "priority": "高", "next_action": "查联系方式 / 准备外联"},
+        "待试玩": {"stage": "待试玩", "priority": "中", "next_action": "试玩 Demo"},
+        "待开发商调查": {"stage": "待开发商调查", "priority": "未定", "next_action": "查开发商背景"},
         "资料不足": {"stage": "待补资料", "priority": "未定", "next_action": "补项目画像"},
         "观望": {"stage": "暂缓", "priority": "低", "next_action": "等待 Demo / 新资料"},
         "可优先查看": {"stage": "待试玩", "priority": "高", "next_action": "试玩 Demo / 补中文区反馈"},
@@ -551,7 +566,7 @@ def apply_suggestion_to_stage(suggestion: str) -> dict:
 
 def is_insufficient_candidate(row: dict) -> bool:
     suggestion, _ = build_auto_suggestion(row)
-    return suggestion == "资料不足"
+    return suggestion in {"待补资料", "资料不足"}
 
 
 def is_released_candidate(value: str) -> bool:
