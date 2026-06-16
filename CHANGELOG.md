@@ -1,5 +1,20 @@
 # CHANGELOG
 
+## V0.7.3.1
+
+- 修复 Steam 浏览器采集的 Playwright 跨线程问题。
+- 改为外部浏览器 + 临时 CDP 连接采集，避免在 Streamlit session 中保存 Playwright 对象。
+
+## V0.7.3
+
+- 新增 Steam 浏览器采集助手。
+- 支持打开受控 Steam 浏览器。
+- 支持从当前页面提取 Steam AppID。
+- 支持补全基础信息。
+- 支持发送到候选池。
+- SteamDB Recent Events 因 403 不再作为主入口。
+- Coming Soon / TBA 专项池后续再做。
+
 ## V0.7.2.1
 
 - Excel 导出改为内存生成 + 页面下载。
