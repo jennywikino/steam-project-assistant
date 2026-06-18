@@ -209,16 +209,33 @@ from modules.steam_app_enricher import enrich_appids_basic
 from modules.steam_browser_collector import (
     DEFAULT_STEAM_URL,
     apply_import_suggestions,
+    bulk_update_collected_selection,
     browser_is_open,
+    clear_collected_csv,
     collect_current_app,
     collect_current_page_appids,
-    collected_display_data,
+    collected_display_data_v074,
+    dedupe_collected_by_appid,
     enrich_collected_basic_info,
     filter_collected,
     launch_browser,
     load_collected,
     playwright_available,
     save_collected_rows,
+    update_collected_selection,
+)
+from modules.steam_search_importer import (
+    apply_search_import_suggestions,
+    bulk_update_search_import_selection,
+    clear_search_imports,
+    dedupe_search_imports_by_appid,
+    enrich_search_imports_basic_info,
+    fetch_steam_search_appids_with_stats,
+    filter_search_imports,
+    load_search_imports,
+    save_search_import_rows,
+    search_import_display_data,
+    update_search_import_selection,
 )
 from modules.steam_data_normalizer import normalize_steam_game_data
 from modules.steam_review_stats import get_cached_review_stats
@@ -255,6 +272,7 @@ STEAMDB_TEMPLATE_CSV_PATH = BASE_DIR / "data" / "steamdb_link_templates.csv"
 STEAMDB_WATCH_NOTE_CSV_PATH = BASE_DIR / "data" / "steamdb_watch_notes.csv"
 NEW_STORE_EVENTS_CSV_PATH = BASE_DIR / "data" / "new_store_events.csv"
 STEAM_BROWSER_COLLECTED_CSV_PATH = BASE_DIR / "data" / "steam_browser_collected.csv"
+STEAM_SEARCH_IMPORT_CSV_PATH = BASE_DIR / "data" / "steam_search_imports.csv"
 STEAM_BROWSER_USER_DATA_DIR = BASE_DIR / "data" / "browser_profiles" / "steam_browser_collector"
 STEAM_BROWSER_DEBUG_PORT = 9222
 DAILY_WATCH_CSV_PATH = BASE_DIR / "data" / "daily_watch_notes.csv"
@@ -5264,44 +5282,48 @@ def render_home_dashboard_page() -> None:
         st.success(st.session_state.pop("home_appdetails_clear_message"))
 
     render_home_metrics(daily_notes, active_projects, pending_projects, candidate_pool)
-    render_home_candidate_pool_summary(candidate_pool)
-    render_home_chacha_lookup()
+    st.caption("用于快速浏览最近采集、导入和待处理的 Steam 项目。优先展示最新采集、未上线、有 Demo、自发行、热门参考等项目。")
 
-    st.subheader("今日新游雷达")
-    st.caption("优先展示即将推出、近期上架和热度异常项目；热销老游戏仅作为趋势参考。")
-    radar_col1, radar_col2 = st.columns([1, 1])
-    with radar_col1:
-        radar_refresh = st.button("刷新雷达", key="home_radar_refresh", use_container_width=True)
-    with radar_col2:
-        if st.button("刷新当前卡片", key="home_radar_refresh_visible_cards", use_container_width=True):
-            st.session_state["force_refresh_visible_appdetails"] = True
-            st.session_state["force_refresh_visible_review_stats"] = True
-    with st.expander("更多刷新 / 缓存操作", expanded=False):
-        more_col1, more_col2, more_col3 = st.columns(3)
-        if more_col1.button("刷新 Steam 图文源", key="home_radar_refresh_feed_more", use_container_width=True):
-            radar_refresh = True
-        if more_col2.button("刷新当前卡片评论数据", key="home_radar_refresh_reviews_more", use_container_width=True):
-            st.session_state["force_refresh_visible_review_stats"] = True
-        if more_col3.button("清理无效详情缓存", key="home_radar_clear_invalid_more", use_container_width=True):
-            removed_count = clear_invalid_appdetails_cache(STEAM_APPDETAILS_CACHE_PATH)
-            st.session_state["home_appdetails_clear_message"] = f"已清理 {removed_count} 条无效 appdetails 缓存。"
-            st.rerun()
-    force_refresh = force_refresh or radar_refresh
     steam_feed = load_steam_store_home_feed(STEAM_HOME_FEED_CACHE_PATH, force_refresh=force_refresh)
-    feed = HomeFeedResult(message="SteamDB 自动抓取已跳过；首页只保留 SteamDB 入口卡。")
+    feed = HomeFeedResult(message="SteamDB 自动抓取入口已下线；新项目发现主流程为 Steam 浏览器采集 + SteamDB 手动粘贴导入。")
+    render_home_project_discovery_feed(candidate_pool, steam_feed, snapshots, daily_notes)
 
-    render_home_steam_store_discovery(steam_feed, snapshots, daily_notes)
-    render_home_common_tools_grid()
-    render_home_discovery_projects(feed, snapshots, daily_notes, steamdb_notes)
+    with st.expander("高级 / 低频工具", expanded=False):
+        render_home_candidate_pool_summary(candidate_pool)
 
-    st.subheader("最近处理记录")
-    project_col1, project_col2 = st.columns([1, 1])
-    with project_col1:
-        render_home_recent_projects(active_projects)
-    with project_col2:
-        render_home_pending_projects(pending_projects)
+        render_home_common_tools_grid()
 
-    with st.expander("高级 / 维护", expanded=False):
+        st.subheader("旧版雷达 / 手动观察")
+        st.caption("低频辅助入口；主流程优先使用上方项目发现 Feed。")
+        radar_col1, radar_col2 = st.columns([1, 1])
+        with radar_col1:
+            radar_refresh = st.button("刷新雷达", key="home_radar_refresh", use_container_width=True)
+        with radar_col2:
+            if st.button("刷新当前卡片", key="home_radar_refresh_visible_cards", use_container_width=True):
+                st.session_state["force_refresh_visible_appdetails"] = True
+                st.session_state["force_refresh_visible_review_stats"] = True
+        with st.expander("更多刷新 / 缓存操作", expanded=False):
+            more_col1, more_col2, more_col3 = st.columns(3)
+            if more_col1.button("刷新 Steam 图文源", key="home_radar_refresh_feed_more", use_container_width=True):
+                radar_refresh = True
+            if more_col2.button("刷新当前卡片评论数据", key="home_radar_refresh_reviews_more", use_container_width=True):
+                st.session_state["force_refresh_visible_review_stats"] = True
+            if more_col3.button("清理无效详情缓存", key="home_radar_clear_invalid_more", use_container_width=True):
+                removed_count = clear_invalid_appdetails_cache(STEAM_APPDETAILS_CACHE_PATH)
+                st.session_state["home_appdetails_clear_message"] = f"已清理 {removed_count} 条无效 appdetails 缓存。"
+                st.rerun()
+        if radar_refresh:
+            steam_feed = load_steam_store_home_feed(STEAM_HOME_FEED_CACHE_PATH, force_refresh=True)
+        render_home_steam_store_discovery(steam_feed, snapshots, daily_notes)
+        render_home_discovery_projects(feed, snapshots, daily_notes, steamdb_notes)
+
+        st.subheader("最近处理 / 待处理")
+        project_col1, project_col2 = st.columns([1, 1])
+        with project_col1:
+            render_home_recent_projects(active_projects)
+        with project_col2:
+            render_home_pending_projects(pending_projects)
+
         lower_col1, lower_col2 = st.columns([1, 1])
         with lower_col1:
             render_home_quick_actions()
@@ -5331,6 +5353,787 @@ def render_pending_home_target_notice() -> None:
     }
     label = label_map.get(str(target), str(target))
     st.info(f"已发送到【{label}】，请打开对应 Tab。相关字段已预填或目标已记录。")
+
+
+HOME_FEED_FILTER_OPTIONS = ["全部", "即将推出", "近期上新", "待试玩", "值得联系", "竞品参考", "手动观察"]
+
+
+def render_home_project_discovery_feed(
+    candidate_pool: pd.DataFrame,
+    steam_feed: SteamStoreFeedResult,
+    snapshots: pd.DataFrame,
+    daily_notes: pd.DataFrame,
+) -> None:
+    st.subheader("项目发现 Feed")
+    feed_filter = st.radio("Feed 筛选", HOME_FEED_FILTER_OPTIONS, horizontal=True, key="home_project_feed_filter")
+    previous_filter = st.session_state.get("home_project_feed_previous_filter")
+    if previous_filter != feed_filter:
+        st.session_state["home_project_feed_visible_count"] = 12
+        st.session_state["home_project_feed_previous_filter"] = feed_filter
+    visible_count = int(st.session_state.get("home_project_feed_visible_count", 12) or 12)
+
+    cards = build_home_project_feed_cards(candidate_pool, steam_feed, snapshots, daily_notes)
+    filtered_cards = [card for card in cards if home_feed_card_matches_filter(card, feed_filter)]
+    if not filtered_cards:
+        st.info("当前筛选暂无项目。可以先用 Steam 浏览器采集，或切换到“全部”。")
+        return
+
+    visible_cards = enrich_steam_store_cards(filtered_cards[:visible_count], limit=visible_count)
+    columns = st.columns(3)
+    for index, card in enumerate(visible_cards):
+        with columns[index % 3]:
+            render_home_project_feed_card(card, index)
+
+    if len(filtered_cards) > visible_count:
+        if st.button("加载更多 12 个", key="home_project_feed_load_more", use_container_width=True):
+            st.session_state["home_project_feed_visible_count"] = visible_count + 12
+            st.rerun()
+    st.caption(f"当前筛选 {len(filtered_cards)} 个项目，已显示 {min(visible_count, len(filtered_cards))} 个。")
+
+
+def build_home_project_feed_cards(
+    candidate_pool: pd.DataFrame,
+    steam_feed: SteamStoreFeedResult,
+    snapshots: pd.DataFrame,
+    daily_notes: pd.DataFrame,
+) -> list[dict]:
+    cards: list[dict] = []
+    cards.extend(home_cards_from_browser_collected())
+    cards.extend(home_cards_from_candidate_pool(candidate_pool))
+    cards.extend(home_cards_from_appdetails_cache(limit=80))
+    if len(cards) < 12:
+        cards.extend(collect_steam_store_cards(steam_feed))
+        cards.extend(collect_manual_observation_cards(snapshots, daily_notes))
+    return dedupe_and_sort_home_project_feed_cards(cards)
+
+
+def home_cards_from_browser_collected() -> list[dict]:
+    try:
+        collected = load_collected(STEAM_BROWSER_COLLECTED_CSV_PATH)
+    except Exception:
+        return []
+    cards = []
+    for _, row in collected.iterrows():
+        row_dict = row.to_dict()
+        appid = str(row_dict.get("appid", "") or "").strip()
+        if not appid:
+            continue
+        cards.append(
+            {
+                "card_type": "steam_browser_collected",
+                "record_id": f"browser_{appid}",
+                "title": clean_candidate_value(row_dict.get("game_name")) or f"AppID {appid}",
+                "game_name": clean_candidate_value(row_dict.get("game_name")) or f"AppID {appid}",
+                "appid": appid,
+                "source": "Steam 浏览器采集",
+                "source_group": "Steam 浏览器采集",
+                "source_url": clean_candidate_value(row_dict.get("source_page_url")) or steam_url_from_appid(appid),
+                "steam_url": clean_candidate_value(row_dict.get("steam_url")) or steam_url_from_appid(appid),
+                "steamdb_url": steamdb_app_url_from_appid(appid),
+                "developer": clean_candidate_value(row_dict.get("developer")),
+                "publisher": clean_candidate_value(row_dict.get("publisher")),
+                "release_date": clean_candidate_value(row_dict.get("release_date") or row_dict.get("release_status")),
+                "has_demo": clean_candidate_value(row_dict.get("has_demo")),
+                "supports_schinese": clean_candidate_value(row_dict.get("supports_schinese")),
+                "genres": clean_candidate_value(row_dict.get("genres_tags")),
+                "auto_suggestion": clean_candidate_value(row_dict.get("import_suggestion")),
+                "auto_reason": clean_candidate_value(row_dict.get("import_reason")),
+                "next_action": "试玩 Demo" if clean_candidate_value(row_dict.get("import_suggestion")) == "待试玩" else "补项目画像",
+                "feed_updated_at": clean_candidate_value(row_dict.get("collected_at")),
+                "feed_source_rank": 1,
+                "feed_category": "手动观察",
+            }
+        )
+    return cards
+
+
+def home_cards_from_candidate_pool(candidate_pool: pd.DataFrame) -> list[dict]:
+    if candidate_pool.empty:
+        return []
+    data = apply_auto_suggestions(candidate_pool)
+    cards = []
+    for _, row in data.iterrows():
+        row_dict = row.to_dict()
+        if is_hidden_home_feed_candidate(row_dict):
+            continue
+        appid = clean_candidate_value(row_dict.get("appid"))
+        game_name = clean_candidate_value(row_dict.get("game_name")) or (f"AppID {appid}" if appid else "")
+        if not appid and not game_name:
+            continue
+        cards.append(
+            {
+                "card_type": "candidate_pool_feed",
+                "record_id": clean_candidate_value(row_dict.get("candidate_id")) or appid or game_name,
+                "title": game_name,
+                "game_name": game_name,
+                "appid": appid,
+                "source": clean_candidate_value(row_dict.get("source")) or "候选池",
+                "source_group": clean_candidate_value(row_dict.get("source")) or "候选池",
+                "source_url": clean_candidate_value(row_dict.get("source_url")) or clean_candidate_value(row_dict.get("steam_url")),
+                "steam_url": clean_candidate_value(row_dict.get("steam_url")) or steam_url_from_appid(appid),
+                "steamdb_url": clean_candidate_value(row_dict.get("steamdb_url")) or steamdb_app_url_from_appid(appid),
+                "developer": clean_candidate_value(row_dict.get("developer")),
+                "publisher": clean_candidate_value(row_dict.get("publisher")),
+                "release_date": clean_candidate_value(row_dict.get("release_date") or row_dict.get("release_status")),
+                "has_demo": clean_candidate_value(row_dict.get("has_demo")),
+                "supports_schinese": clean_candidate_value(row_dict.get("supports_schinese")),
+                "genres": clean_candidate_value(row_dict.get("genres_tags")),
+                "auto_suggestion": clean_candidate_value(row_dict.get("auto_suggestion")),
+                "auto_reason": clean_candidate_value(row_dict.get("auto_reason")),
+                "next_action": clean_candidate_value(row_dict.get("next_action")),
+                "stage": clean_candidate_value(row_dict.get("stage")),
+                "priority": clean_candidate_value(row_dict.get("priority")),
+                "feed_updated_at": clean_candidate_value(row_dict.get("updated_at") or row_dict.get("created_at")),
+                "feed_source_rank": 2,
+                "feed_category": "候选池",
+            }
+        )
+    return cards
+
+
+def home_cards_from_appdetails_cache(limit: int = 80) -> list[dict]:
+    cards = []
+    try:
+        summaries = load_cached_appdetails_summaries(STEAM_APPDETAILS_CACHE_PATH)
+    except Exception:
+        return []
+    for appid, detail in list(summaries.items())[:limit]:
+        if not isinstance(detail, dict):
+            continue
+        game_name = clean_candidate_value(detail.get("name") or detail.get("game_name"))
+        if not game_name:
+            continue
+        cards.append(
+            {
+                "card_type": "appdetails_cache_feed",
+                "record_id": f"cache_{appid}",
+                "title": game_name,
+                "game_name": game_name,
+                "appid": str(appid),
+                "source": "Steam 基础信息缓存",
+                "source_group": "Steam 基础信息缓存",
+                "source_url": steam_url_from_appid(str(appid)),
+                "steam_url": steam_url_from_appid(str(appid)),
+                "steamdb_url": steamdb_app_url_from_appid(str(appid)),
+                "developer": clean_candidate_value(detail.get("developer")),
+                "publisher": clean_candidate_value(detail.get("publisher")),
+                "release_date": clean_candidate_value(detail.get("release_date")),
+                "has_demo": clean_candidate_value(detail.get("has_demo")),
+                "supports_schinese": clean_candidate_value(detail.get("supports_schinese")),
+                "genres": clean_candidate_value(detail.get("genres_text")),
+                "image_url": clean_candidate_value(detail.get("header_image")),
+                "next_action": "补项目画像",
+                "feed_updated_at": clean_candidate_value(detail.get("checked_at")),
+                "feed_source_rank": 3,
+                "feed_category": "缓存",
+            }
+        )
+    return cards
+
+
+def dedupe_and_sort_home_project_feed_cards(cards: list[dict]) -> list[dict]:
+    cards = [card for card in cards if home_card_key(card)]
+    cards.sort(key=lambda card: (int(card.get("feed_source_rank", 9) or 9), -home_feed_timestamp_value(card)))
+    seen = set()
+    output = []
+    for card in cards:
+        key = home_card_key(card)
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(card)
+    return output
+
+
+def home_feed_timestamp(card: dict) -> pd.Timestamp:
+    value = card.get("feed_updated_at") or card.get("updated_at") or card.get("collected_at") or card.get("created_at")
+    ts = pd.to_datetime(value, errors="coerce")
+    if pd.isna(ts):
+        return pd.Timestamp.min
+    return ts
+
+
+def home_feed_timestamp_value(card: dict) -> int:
+    ts = home_feed_timestamp(card)
+    if ts == pd.Timestamp.min:
+        return 0
+    return int(ts.value)
+
+
+def is_hidden_home_feed_candidate(row: dict) -> bool:
+    archived = clean_candidate_value(row.get("is_archived")).casefold()
+    stage = clean_candidate_value(row.get("stage"))
+    reject_reason = clean_candidate_value(row.get("reject_reason"))
+    return archived in {"true", "1", "yes", "y"} or "放弃" in stage or bool(reject_reason)
+
+
+def home_feed_card_matches_filter(card: dict, feed_filter: str) -> bool:
+    if feed_filter == "全部":
+        return True
+    release_text = " ".join([str(card.get("release_date", "") or ""), str(card.get("release_status", "") or "")]).casefold()
+    suggestion = str(card.get("auto_suggestion", "") or "")
+    source = str(card.get("source_group", "") or card.get("source", "") or "")
+    next_action = str(card.get("next_action", "") or "")
+    if feed_filter == "即将推出":
+        return any(token in release_text for token in ["coming soon", "tba", "即将", "未发售", "待定"])
+    if feed_filter == "近期上新":
+        return "Steam 浏览器采集" in source or "新" in release_text or "recent" in release_text
+    if feed_filter == "待试玩":
+        return "待试玩" in suggestion or "试玩" in next_action or str(card.get("has_demo", "") or "") == "是"
+    if feed_filter == "值得联系":
+        return "值得联系" in suggestion or "候选池观察" in suggestion
+    if feed_filter == "竞品参考":
+        return "竞品参考" in suggestion
+    if feed_filter == "手动观察":
+        return "浏览器采集" in source or "手动观察" in source or card.get("card_type") in {"steam_browser_collected", "daily_watch", "snapshot"}
+    return True
+
+
+def render_home_project_feed_card(card: dict, index: int) -> None:
+    with st.container(border=True):
+        image_url = resolve_home_card_image(card)
+        if image_url:
+            st.image(image_url, use_container_width=True)
+        title = card.get("game_name") or card.get("title") or f"AppID {card.get('appid', '')}"
+        st.markdown(f"**{title}**")
+        st.caption(f"{card.get('source_group') or card.get('source') or '项目发现'} · AppID：{card.get('appid') or '未获取'}")
+        suggestion = str(card.get("auto_suggestion", "") or "").strip()
+        if "竞品参考" in suggestion:
+            st.warning("竞品参考")
+        elif suggestion:
+            st.info(suggestion)
+        st.caption(f"发售：{compact_card_value(card.get('release_date') or card.get('release_status'))}")
+        st.caption(f"Demo：{compact_card_value(card.get('has_demo'))} · 简中：{compact_card_value(card.get('supports_schinese'))}")
+        st.caption(f"开发：{compact_card_value(card.get('developer'))}")
+        st.caption(f"发行：{compact_card_value(card.get('publisher'))}")
+        st.caption(f"类型：{compact_card_value(card.get('genres') or card.get('genres_tags'), max_len=60)}")
+        st.caption(f"下一步：{compact_card_value(card.get('next_action'))}")
+
+        action_cols = st.columns(4)
+        with action_cols[0]:
+            if card.get("steam_url"):
+                st.link_button("打开 Steam", card["steam_url"], use_container_width=True)
+        with action_cols[1]:
+            if st.button("加入候选池", key=f"feed_candidate_{home_card_key(card)}_{index}", use_container_width=True):
+                add_home_card_to_candidate_pool(card)
+        with action_cols[2]:
+            if st.button("项目画像", key=f"feed_profile_{home_card_key(card)}_{index}", use_container_width=True):
+                send_home_card_to_profile(card)
+        with action_cols[3]:
+            if st.button("忽略", key=f"feed_ignore_{home_card_key(card)}_{index}", use_container_width=True):
+                ignore_home_card_candidate(card)
+                st.rerun()
+
+
+HOME_FEED_FILTER_OPTIONS = [
+    "全部",
+    "最新采集",
+    "未上线/TBA",
+    "有 Demo/可试玩",
+    "无发行/自发行",
+    "热门/评论多",
+    "潜力观察",
+    "竞品参考",
+]
+
+HOME_FEED_FILTER_DESCRIPTIONS = {
+    "最新采集": "最近通过浏览器采集或导入的项目",
+    "未上线/TBA": "仍处于 Coming Soon / TBA / 未来发售状态",
+    "有 Demo/可试玩": "可优先进入试玩验证",
+    "无发行/自发行": "潜在发行机会更高",
+    "热门/评论多": "适合竞品或市场参考",
+    "潜力观察": "需要补资料或继续判断",
+    "竞品参考": "已有发行或成熟项目，适合参考不一定适合联系",
+}
+
+BIG_PUBLISHER_KEYWORDS = [
+    "electronic arts",
+    "ea",
+    "capcom",
+    "square enix",
+    "bandai namco",
+    "ubisoft",
+    "sega",
+    "xbox",
+    "playstation",
+    "sony",
+    "nintendo",
+    "netease",
+    "tencent",
+    "devolver",
+    "team17",
+    "raw fury",
+    "focus entertainment",
+    "paradox",
+    "2k",
+    "take-two",
+]
+
+
+def render_home_project_discovery_feed(
+    candidate_pool: pd.DataFrame,
+    steam_feed: SteamStoreFeedResult,
+    snapshots: pd.DataFrame,
+    daily_notes: pd.DataFrame,
+) -> None:
+    st.subheader("项目发现 Feed")
+    feed_filter = st.radio("Feed 筛选", HOME_FEED_FILTER_OPTIONS, horizontal=True, key="home_project_feed_filter")
+    if feed_filter in HOME_FEED_FILTER_DESCRIPTIONS:
+        st.caption(f"{feed_filter}：{HOME_FEED_FILTER_DESCRIPTIONS[feed_filter]}")
+
+    visible_by_filter = st.session_state.setdefault("home_project_feed_visible_count_by_filter", {})
+    if not isinstance(visible_by_filter, dict):
+        visible_by_filter = {}
+        st.session_state["home_project_feed_visible_count_by_filter"] = visible_by_filter
+    visible_count = int(visible_by_filter.get(feed_filter, 12) or 12)
+
+    candidate_appids = home_feed_candidate_appids(candidate_pool)
+    cards = build_home_project_feed_cards(candidate_pool, steam_feed, snapshots, daily_notes)
+    filtered_cards = [card for card in cards if home_feed_card_matches_filter(card, feed_filter)]
+    filtered_cards = sort_home_project_feed_cards(filtered_cards, feed_filter)
+    if not filtered_cards:
+        st.info("当前筛选暂无项目。可以先用 Steam 浏览器采集，或切换到“全部”。")
+        return
+
+    visible_cards = enrich_steam_store_cards(filtered_cards[:visible_count], limit=visible_count)
+    columns = st.columns(3)
+    for index, card in enumerate(visible_cards):
+        with columns[index % 3]:
+            render_home_project_feed_card(card, index, card.get("appid") in candidate_appids)
+
+    shown_count = min(visible_count, len(filtered_cards))
+    if len(filtered_cards) > visible_count:
+        if st.button("加载更多 12 个", key=f"home_project_feed_load_more_{feed_filter}", use_container_width=True):
+            visible_by_filter[feed_filter] = visible_count + 12
+            st.session_state["home_project_feed_visible_count_by_filter"] = visible_by_filter
+            st.rerun()
+    else:
+        st.caption("已显示全部。")
+    st.caption(f"当前分类 {len(filtered_cards)} 个项目，已显示 {shown_count} 个。")
+
+
+def home_feed_candidate_appids(candidate_pool: pd.DataFrame) -> set[str]:
+    if candidate_pool.empty or "appid" not in candidate_pool.columns:
+        return set()
+    return {str(value).strip() for value in candidate_pool["appid"].fillna("").tolist() if str(value).strip()}
+
+
+def dedupe_and_sort_home_project_feed_cards(cards: list[dict]) -> list[dict]:
+    cards = [card for card in cards if home_card_key(card)]
+    cards.sort(key=lambda card: (-home_feed_timestamp_value(card), int(card.get("feed_source_rank", 9) or 9)))
+    seen = set()
+    output = []
+    for card in cards:
+        key = home_card_key(card)
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(card)
+    return output
+
+
+def sort_home_project_feed_cards(cards: list[dict], feed_filter: str) -> list[dict]:
+    if feed_filter == "热门/评论多":
+        return sorted(cards, key=lambda card: (-home_feed_review_count(card), -home_feed_timestamp_value(card)))
+    if feed_filter == "竞品参考":
+        return sorted(cards, key=lambda card: (-home_feed_review_count(card), not home_feed_has_review_score(card), home_feed_is_unreleased(card), -home_feed_timestamp_value(card)))
+    if feed_filter == "未上线/TBA":
+        return sorted(cards, key=lambda card: (-home_feed_opportunity_score(card), -home_feed_timestamp_value(card)))
+    if feed_filter == "无发行/自发行":
+        return sorted(cards, key=lambda card: (-home_feed_self_published_score(card), -home_feed_timestamp_value(card)))
+    if feed_filter == "潜力观察":
+        return sorted(cards, key=lambda card: (-home_feed_potential_score(card), -home_feed_timestamp_value(card)))
+    return sorted(cards, key=lambda card: (-home_feed_timestamp_value(card), int(card.get("feed_source_rank", 9) or 9)))
+
+
+def home_feed_card_matches_filter(card: dict, feed_filter: str) -> bool:
+    if feed_filter == "全部":
+        return True
+    if feed_filter == "最新采集":
+        return card.get("card_type") in {"steam_browser_collected", "candidate_pool_feed"} and home_feed_timestamp_value(card) > 0
+    if feed_filter == "未上线/TBA":
+        return home_feed_is_unreleased(card)
+    if feed_filter == "有 Demo/可试玩":
+        return home_feed_has_demo(card)
+    if feed_filter == "无发行/自发行":
+        return (
+            home_feed_is_self_published(card)
+            and not home_feed_is_competitor_reference(card)
+            and not home_feed_is_big_publisher(card)
+            and not (home_feed_is_released(card) and not home_feed_has_demo(card))
+        )
+    if feed_filter == "热门/评论多":
+        return home_feed_review_count(card) >= 500 or home_feed_has_review_score(card) or home_feed_has_hot_source(card)
+    if feed_filter == "潜力观察":
+        return home_feed_is_potential_watch(card)
+    if feed_filter == "竞品参考":
+        return home_feed_is_competitor_reference(card)
+    return True
+
+
+def render_home_project_feed_card(card: dict, index: int, already_in_candidate_pool: bool = False) -> None:
+    with st.container(border=True):
+        image_url = resolve_home_card_image(card)
+        if image_url:
+            st.image(image_url, use_container_width=True)
+        title = card.get("game_name") or card.get("title") or f"AppID {card.get('appid', '')}"
+        st.markdown(f"**{title}**")
+        st.caption(f"{card.get('source_group') or card.get('source') or '项目发现'} · AppID：{card.get('appid') or '未获取'}")
+
+        tags = home_feed_card_tags(card)
+        if tags:
+            st.markdown(" ".join([f"`{tag}`" for tag in tags]))
+
+        suggestion = str(card.get("auto_suggestion", "") or "").strip()
+        if suggestion:
+            if "竞品参考" in suggestion:
+                st.warning(suggestion)
+            else:
+                st.info(suggestion)
+        st.caption(f"发售：{compact_card_value(card.get('release_date') or card.get('release_status'))}")
+        st.caption(f"Demo：{compact_card_value(card.get('has_demo'))} · 简中：{compact_card_value(card.get('supports_schinese'))}")
+        st.caption(f"开发：{compact_card_value(card.get('developer'))}")
+        st.caption(f"发行：{compact_card_value(card.get('publisher'))}")
+        st.caption(f"类型：{compact_card_value(card.get('genres') or card.get('genres_tags'), max_len=60)}")
+        review_count = home_feed_review_count(card)
+        if review_count:
+            st.caption(f"评论数：{review_count}")
+        st.caption(f"下一步：{compact_card_value(card.get('next_action'))}")
+
+        action_cols = st.columns(4)
+        with action_cols[0]:
+            if card.get("steam_url"):
+                st.link_button("打开 Steam", card["steam_url"], use_container_width=True)
+        with action_cols[1]:
+            button_label = "已在候选池 / 更新候选池" if already_in_candidate_pool else "加入候选池"
+            if st.button(button_label, key=f"feed_candidate_{home_card_key(card)}_{index}", use_container_width=True):
+                add_home_card_to_candidate_pool(card)
+        with action_cols[2]:
+            if st.button("项目画像", key=f"feed_profile_{home_card_key(card)}_{index}", use_container_width=True):
+                send_home_card_to_profile(card)
+        with action_cols[3]:
+            if st.button("忽略", key=f"feed_ignore_{home_card_key(card)}_{index}", use_container_width=True):
+                ignore_home_card_candidate(card)
+                st.rerun()
+
+
+def home_feed_card_tags(card: dict) -> list[str]:
+    tags = []
+    if card.get("card_type") == "steam_browser_collected":
+        tags.append("最新采集")
+    if home_feed_is_unreleased(card):
+        tags.append("未上线")
+    if home_feed_has_demo(card):
+        tags.append("有 Demo")
+    if home_feed_supports_schinese(card):
+        tags.append("简中")
+    if home_feed_is_self_published(card):
+        tags.append("自发行")
+    if home_feed_is_competitor_reference(card):
+        tags.append("竞品参考")
+    if home_feed_is_data_incomplete(card):
+        tags.append("资料不足")
+    if home_feed_review_count(card) >= 500 or home_feed_has_hot_source(card):
+        tags.append("热门参考")
+    return tags[:7]
+
+
+def home_feed_text_blob(card: dict) -> str:
+    values = [
+        card.get("release_status"),
+        card.get("release_date"),
+        card.get("stage"),
+        card.get("next_action"),
+        card.get("auto_suggestion"),
+        card.get("import_suggestion"),
+        card.get("auto_reason"),
+        card.get("import_reason"),
+        card.get("source"),
+        card.get("source_group"),
+    ]
+    return " ".join([str(value) for value in values if value is not None]).casefold()
+
+
+def home_feed_release_text(card: dict) -> str:
+    return " ".join([str(card.get("release_date", "") or ""), str(card.get("release_status", "") or "")]).casefold()
+
+
+def home_feed_has_demo(card: dict) -> bool:
+    value = str(card.get("has_demo", "") or "").strip().casefold()
+    text = home_feed_text_blob(card)
+    return value in {"是", "yes", "true", "1", "有", "demo"} or "demo" in text or "试玩" in text
+
+
+def home_feed_supports_schinese(card: dict) -> bool:
+    value = str(card.get("supports_schinese", "") or "").strip().casefold()
+    return value in {"是", "yes", "true", "1", "有", "简中", "支持"}
+
+
+def home_feed_is_unreleased(card: dict) -> bool:
+    text = home_feed_release_text(card)
+    all_text = home_feed_text_blob(card)
+    if any(token in text for token in ["coming soon", "tba", "即将推出", "即将", "待定", "未发售"]):
+        return True
+    if "未发售" in all_text:
+        return True
+    date_value = pd.to_datetime(card.get("release_date"), errors="coerce")
+    if not pd.isna(date_value):
+        try:
+            date_value = date_value.tz_localize(None) if getattr(date_value, "tzinfo", None) else date_value
+            today = pd.Timestamp.now(tz=None).normalize()
+            return date_value.normalize() > today
+        except Exception:
+            return False
+    return False
+
+
+def home_feed_is_released(card: dict) -> bool:
+    return not home_feed_is_unreleased(card) and bool(str(card.get("release_date", "") or "").strip())
+
+
+def home_feed_is_self_published(card: dict) -> bool:
+    developer = str(card.get("developer", "") or "").strip().casefold()
+    publisher = str(card.get("publisher", "") or "").strip().casefold()
+    explicit = str(card.get("is_self_published", "") or "").strip().casefold()
+    return explicit in {"是", "yes", "true", "1"} or not publisher or (developer and publisher == developer)
+
+
+def home_feed_is_big_publisher(card: dict) -> bool:
+    publisher = str(card.get("publisher", "") or "").strip().casefold()
+    if not publisher:
+        return False
+    return any(keyword in publisher for keyword in BIG_PUBLISHER_KEYWORDS)
+
+
+def home_feed_review_count(card: dict) -> int:
+    for key in ["review_count", "reviews_count", "reviews_total", "review_total"]:
+        value = card.get(key)
+        if value is None or value == "":
+            continue
+        digits = re.sub(r"[^0-9]", "", str(value))
+        if digits:
+            return int(digits)
+    return 0
+
+
+def home_feed_has_review_score(card: dict) -> bool:
+    return bool(str(card.get("review_score", "") or card.get("review_summary", "") or "").strip())
+
+
+def home_feed_has_hot_source(card: dict) -> bool:
+    text = home_feed_text_blob(card)
+    return any(token in text for token in ["热门", "热销", "top", "popular", "trending", "爆款"])
+
+
+def home_feed_is_competitor_reference(card: dict) -> bool:
+    text = home_feed_text_blob(card)
+    developer = str(card.get("developer", "") or "").strip()
+    publisher = str(card.get("publisher", "") or "").strip()
+    if "竞品参考" in text:
+        return True
+    if publisher and developer and publisher.casefold() != developer.casefold():
+        return True
+    return home_feed_review_count(card) >= 1000 and home_feed_is_released(card)
+
+
+def home_feed_is_data_incomplete(card: dict) -> bool:
+    text = home_feed_text_blob(card)
+    required = [card.get("game_name") or card.get("title"), card.get("developer"), card.get("publisher"), card.get("release_date")]
+    return "待补资料" in text or "资料不足" in text or sum(bool(str(value or "").strip()) for value in required) <= 2
+
+
+def home_feed_opportunity_score(card: dict) -> int:
+    return sum(
+        [
+            4 if home_feed_is_unreleased(card) else 0,
+            3 if home_feed_has_demo(card) else 0,
+            2 if home_feed_supports_schinese(card) else 0,
+            2 if home_feed_is_self_published(card) else 0,
+            1 if card.get("card_type") == "steam_browser_collected" else 0,
+        ]
+    )
+
+
+def home_feed_self_published_score(card: dict) -> int:
+    return sum(
+        [
+            4 if home_feed_is_unreleased(card) else 0,
+            3 if home_feed_has_demo(card) else 0,
+            2 if home_feed_supports_schinese(card) else 0,
+            2 if home_feed_is_self_published(card) else 0,
+            1 if not home_feed_is_data_incomplete(card) else 0,
+        ]
+    )
+
+
+def home_feed_potential_score(card: dict) -> int:
+    return sum(
+        [
+            5 if home_feed_is_unreleased(card) else 0,
+            3 if home_feed_has_demo(card) else 0,
+            2 if home_feed_supports_schinese(card) else 0,
+            2 if home_feed_is_self_published(card) else 0,
+            1 if home_feed_is_data_incomplete(card) else 0,
+        ]
+    )
+
+
+def home_feed_is_potential_watch(card: dict) -> bool:
+    text = home_feed_text_blob(card)
+    if any(token in text for token in ["候选池观察", "待开发商调查", "待补资料", "资料不足"]):
+        return True
+    if home_feed_is_unreleased(card) and (home_feed_has_demo(card) or home_feed_supports_schinese(card)):
+        return True
+    return home_feed_is_self_published(card) and home_feed_is_data_incomplete(card) and not home_feed_is_competitor_reference(card)
+
+
+def home_cards_from_browser_collected() -> list[dict]:
+    try:
+        collected = load_collected(STEAM_BROWSER_COLLECTED_CSV_PATH)
+    except Exception:
+        return []
+    cards = []
+    for _, row in collected.iterrows():
+        row_dict = row.to_dict()
+        appid = str(row_dict.get("appid", "") or "").strip()
+        if not appid:
+            continue
+        suggestion = clean_candidate_value(row_dict.get("import_suggestion"))
+        cards.append(
+            {
+                "card_type": "steam_browser_collected",
+                "record_id": f"browser_{appid}",
+                "title": clean_candidate_value(row_dict.get("game_name")) or f"AppID {appid}",
+                "game_name": clean_candidate_value(row_dict.get("game_name")) or f"AppID {appid}",
+                "appid": appid,
+                "source": "Steam 浏览器采集",
+                "source_group": "Steam 浏览器采集",
+                "source_url": clean_candidate_value(row_dict.get("source_page_url")) or steam_url_from_appid(appid),
+                "steam_url": clean_candidate_value(row_dict.get("steam_url")) or steam_url_from_appid(appid),
+                "steamdb_url": steamdb_app_url_from_appid(appid),
+                "developer": clean_candidate_value(row_dict.get("developer")),
+                "publisher": clean_candidate_value(row_dict.get("publisher")),
+                "release_status": clean_candidate_value(row_dict.get("release_status")),
+                "release_date": clean_candidate_value(row_dict.get("release_date") or row_dict.get("release_status")),
+                "has_demo": clean_candidate_value(row_dict.get("has_demo")),
+                "supports_schinese": clean_candidate_value(row_dict.get("supports_schinese")),
+                "genres": clean_candidate_value(row_dict.get("genres_tags")),
+                "review_score": clean_candidate_value(row_dict.get("review_score")),
+                "review_count": clean_candidate_value(row_dict.get("review_count")),
+                "header_image": clean_candidate_value(row_dict.get("header_image")),
+                "image_url": clean_candidate_value(row_dict.get("header_image")),
+                "auto_suggestion": suggestion,
+                "import_suggestion": suggestion,
+                "auto_reason": clean_candidate_value(row_dict.get("import_reason")),
+                "import_reason": clean_candidate_value(row_dict.get("import_reason")),
+                "next_action": "试玩 Demo" if suggestion == "待试玩" else "补项目画像",
+                "feed_updated_at": clean_candidate_value(row_dict.get("collected_at")),
+                "feed_source_rank": 1,
+                "feed_category": "最新采集",
+            }
+        )
+    return cards
+
+
+def home_cards_from_candidate_pool(candidate_pool: pd.DataFrame) -> list[dict]:
+    if candidate_pool.empty:
+        return []
+    data = apply_auto_suggestions(candidate_pool)
+    cards = []
+    for _, row in data.iterrows():
+        row_dict = row.to_dict()
+        if is_hidden_home_feed_candidate(row_dict):
+            continue
+        appid = clean_candidate_value(row_dict.get("appid"))
+        game_name = clean_candidate_value(row_dict.get("game_name")) or (f"AppID {appid}" if appid else "")
+        if not appid and not game_name:
+            continue
+        cards.append(
+            {
+                "card_type": "candidate_pool_feed",
+                "record_id": clean_candidate_value(row_dict.get("candidate_id")) or appid or game_name,
+                "title": game_name,
+                "game_name": game_name,
+                "appid": appid,
+                "source": clean_candidate_value(row_dict.get("source")) or "候选池",
+                "source_group": clean_candidate_value(row_dict.get("source")) or "候选池",
+                "source_url": clean_candidate_value(row_dict.get("source_url")) or clean_candidate_value(row_dict.get("steam_url")),
+                "steam_url": clean_candidate_value(row_dict.get("steam_url")) or steam_url_from_appid(appid),
+                "steamdb_url": clean_candidate_value(row_dict.get("steamdb_url")) or steamdb_app_url_from_appid(appid),
+                "developer": clean_candidate_value(row_dict.get("developer")),
+                "publisher": clean_candidate_value(row_dict.get("publisher")),
+                "release_status": clean_candidate_value(row_dict.get("release_status")),
+                "release_date": clean_candidate_value(row_dict.get("release_date") or row_dict.get("release_status")),
+                "has_demo": clean_candidate_value(row_dict.get("has_demo")),
+                "supports_schinese": clean_candidate_value(row_dict.get("supports_schinese")),
+                "genres": clean_candidate_value(row_dict.get("genres_tags")),
+                "review_score": clean_candidate_value(row_dict.get("review_score")),
+                "review_count": clean_candidate_value(row_dict.get("review_count")),
+                "header_image": clean_candidate_value(row_dict.get("header_image")),
+                "image_url": clean_candidate_value(row_dict.get("header_image")),
+                "auto_suggestion": clean_candidate_value(row_dict.get("auto_suggestion")),
+                "auto_reason": clean_candidate_value(row_dict.get("auto_reason")),
+                "next_action": clean_candidate_value(row_dict.get("next_action")),
+                "stage": clean_candidate_value(row_dict.get("stage")),
+                "priority": clean_candidate_value(row_dict.get("priority")),
+                "is_self_published": clean_candidate_value(row_dict.get("is_self_published")),
+                "feed_updated_at": clean_candidate_value(row_dict.get("updated_at") or row_dict.get("created_at")),
+                "feed_source_rank": 2,
+                "feed_category": "候选池",
+            }
+        )
+    return cards
+
+
+def home_cards_from_appdetails_cache(limit: int = 80) -> list[dict]:
+    cards = []
+    try:
+        summaries = load_cached_appdetails_summaries(STEAM_APPDETAILS_CACHE_PATH)
+    except Exception:
+        return []
+    for appid, detail in list(summaries.items())[:limit]:
+        if not isinstance(detail, dict):
+            continue
+        game_name = clean_candidate_value(detail.get("name") or detail.get("game_name"))
+        if not game_name:
+            continue
+        cards.append(
+            {
+                "card_type": "appdetails_cache_feed",
+                "record_id": f"cache_{appid}",
+                "title": game_name,
+                "game_name": game_name,
+                "appid": str(appid),
+                "source": "Steam 基础信息缓存",
+                "source_group": "Steam 基础信息缓存",
+                "source_url": steam_url_from_appid(str(appid)),
+                "steam_url": steam_url_from_appid(str(appid)),
+                "steamdb_url": steamdb_app_url_from_appid(str(appid)),
+                "developer": clean_candidate_value(detail.get("developer")),
+                "publisher": clean_candidate_value(detail.get("publisher")),
+                "release_status": clean_candidate_value(detail.get("release_status")),
+                "release_date": clean_candidate_value(detail.get("release_date") or detail.get("release_status")),
+                "has_demo": clean_candidate_value(detail.get("has_demo")),
+                "supports_schinese": clean_candidate_value(detail.get("supports_schinese")),
+                "genres": clean_candidate_value(detail.get("genres_text") or detail.get("genres_tags")),
+                "review_score": clean_candidate_value(detail.get("review_score")),
+                "review_count": clean_candidate_value(detail.get("review_count")),
+                "header_image": clean_candidate_value(detail.get("header_image")),
+                "image_url": clean_candidate_value(detail.get("header_image")),
+                "next_action": "补项目画像",
+                "feed_updated_at": clean_candidate_value(detail.get("checked_at")),
+                "feed_source_rank": 3,
+                "feed_category": "缓存",
+            }
+        )
+    return cards
+
+
+def render_chacha_page() -> None:
+    ensure_search_history_csv_exists(SEARCH_HISTORY_CSV_PATH)
+    ensure_candidate_pool_csv_exists(CANDIDATE_POOL_CSV_PATH)
+    ensure_csv_exists(CSV_PATH)
+    render_home_chacha_lookup()
 
 
 def render_home_chacha_lookup() -> None:
@@ -9435,6 +10238,7 @@ def render_steam_browser_collector_page() -> None:
         "工具读取当前页面里的 Steam app 链接并导入候选池。"
     )
     st.caption("本页不抓 SteamDB、不做反爬对抗、不伪装登录，也不读取 Streamlit iframe DOM。")
+    st.info("SteamDB 自动抓取入口已下线。SteamDB 仍可通过“SteamDB 导入”进行手动粘贴导入；新项目发现优先使用 Steam 浏览器采集。")
 
     if not playwright_available():
         st.error("当前环境未安装 Playwright，Steam 浏览器采集不可用。")
@@ -9499,6 +10303,31 @@ def render_steam_browser_collector_page() -> None:
         with st.expander(f"本次抓取预览（{len(last_rows)} 条，保存后进入下方表格）", expanded=False):
             st.dataframe(pd.DataFrame(last_rows), use_container_width=True, hide_index=True)
 
+    cleanup_cols = st.columns([1, 1, 2])
+    if cleanup_cols[0].button("按 AppID 去重", key="steam_browser_dedupe_collected", use_container_width=True):
+        stats = dedupe_collected_by_appid(STEAM_BROWSER_COLLECTED_CSV_PATH)
+        st.success(
+            "去重完成："
+            f"before {stats['before']}，after {stats['after']}，removed {stats['removed']}。"
+            f"备份：{stats['backup_path']}"
+        )
+    confirm_clear = cleanup_cols[1].checkbox(
+        "我确认清空本次采集",
+        key="steam_browser_confirm_clear_collected",
+        help="会清空 data/steam_browser_collected.csv；清空前会自动备份，不会修改 candidate_pool.csv。",
+    )
+    if cleanup_cols[2].button("清空本次采集", key="steam_browser_clear_collected", use_container_width=True):
+        if not confirm_clear:
+            st.warning("清空前请先勾选确认。此操作只清空 data/steam_browser_collected.csv，不会修改 candidate_pool.csv。")
+        else:
+            stats = clear_collected_csv(STEAM_BROWSER_COLLECTED_CSV_PATH)
+            st.session_state["steam_browser_last_rows"] = []
+            st.success(
+                "已清空本次采集："
+                f"before {stats['before']}，after {stats['after']}，removed {stats['removed']}。"
+                f"备份：{stats['backup_path']}"
+            )
+
     data = apply_import_suggestions(load_collected(STEAM_BROWSER_COLLECTED_CSV_PATH))
     filter_cols = st.columns(6)
     filtered = filter_collected(
@@ -9515,16 +10344,45 @@ def render_steam_browser_collector_page() -> None:
         st.info("暂无 Steam 浏览器采集记录。请先打开 Steam 浏览器并抓取当前页 AppID。")
         return
 
-    display = collected_display_data(filtered)
+    select_cols = st.columns(6)
+    selection_actions = [
+        ("全选当前筛选结果", "select_visible"),
+        ("全选有 Demo", "select_demo"),
+        ("全选有 Demo + 自发行", "select_demo_self"),
+        ("全选未上线 + 有 Demo", "select_unreleased_demo"),
+        ("清空当前选择", "clear_visible"),
+        ("反选当前筛选结果", "invert_visible"),
+    ]
+    for index, (label, mode) in enumerate(selection_actions):
+        if select_cols[index].button(label, key=f"steam_browser_bulk_select_{mode}", use_container_width=True):
+            bulk_update_collected_selection(STEAM_BROWSER_COLLECTED_CSV_PATH, filtered, mode)
+            st.session_state["steam_browser_editor_version"] = int(st.session_state.get("steam_browser_editor_version", 0)) + 1
+            data = apply_import_suggestions(load_collected(STEAM_BROWSER_COLLECTED_CSV_PATH))
+            filtered = filter_collected(
+                data,
+                demo_only=st.session_state.get("steam_browser_filter_demo", False),
+                unreleased_only=st.session_state.get("steam_browser_filter_unreleased", False),
+                self_published_only=st.session_state.get("steam_browser_filter_self", False),
+                schinese_only=st.session_state.get("steam_browser_filter_schinese", False),
+                observation_only=st.session_state.get("steam_browser_filter_observation", False),
+                exclude_reference=st.session_state.get("steam_browser_filter_reference", False),
+            )
+
+    display = collected_display_data_v074(filtered)
     edited = st.data_editor(
         display,
-        key="steam_browser_collected_editor",
+        key=f"steam_browser_collected_editor_{st.session_state.get('steam_browser_editor_version', 0)}",
         use_container_width=True,
         hide_index=True,
         disabled=[column for column in display.columns if column != "是否选择"],
+        column_config={
+            "Steam 链接": st.column_config.LinkColumn("Steam 链接", display_text="打开 Steam"),
+        },
     )
     selected_display = edited.loc[edited["是否选择"].astype(bool)].copy() if "是否选择" in edited.columns else pd.DataFrame()
     selected_appids = set(selected_display["AppID"].astype(str).str.strip()) if not selected_display.empty else set()
+    visible_appids = filtered["appid"].astype(str).str.strip().tolist()
+    update_collected_selection(STEAM_BROWSER_COLLECTED_CSV_PATH, visible_appids, list(selected_appids))
     selected_rows = filtered.loc[filtered["appid"].astype(str).str.strip().isin(selected_appids)].copy()
 
     send_cols = st.columns([1, 3])
@@ -9576,6 +10434,256 @@ def import_steam_browser_rows_to_candidate_pool(rows: list[dict]) -> dict:
             "auto_suggestion": suggestion,
             "auto_reason": clean_candidate_value(row.get("import_reason")),
             "source_notes": f"来自 Steam 浏览器采集：{source_title}" if source_title else "来自 Steam 浏览器采集",
+        }
+
+        existing = find_candidate_by_appid(CANDIDATE_POOL_CSV_PATH, appid)
+        if existing:
+            updates = {}
+            for field in [
+                "game_name",
+                "steam_url",
+                "steamdb_url",
+                "developer",
+                "publisher",
+                "release_status",
+                "release_date",
+                "has_demo",
+                "supports_schinese",
+                "genres_tags",
+                "review_score",
+                "review_count",
+                "source",
+                "source_url",
+                "next_action",
+                "auto_suggestion",
+                "auto_reason",
+            ]:
+                current_value = clean_candidate_value(existing.get(field))
+                new_value = incoming.get(field, "")
+                if field == "game_name":
+                    if (
+                        is_empty_or_placeholder_game_name(current_value, appid)
+                        and new_value
+                        and not is_empty_or_placeholder_game_name(new_value, appid)
+                    ):
+                        updates[field] = new_value
+                    continue
+                if not current_value and new_value:
+                    updates[field] = new_value
+            current_notes = clean_candidate_value(existing.get("source_notes"))
+            incoming_notes = clean_candidate_value(incoming.get("source_notes"))
+            if incoming_notes and incoming_notes not in current_notes:
+                updates["source_notes"] = append_note_text(current_notes, incoming_notes)
+            if updates:
+                update_candidate_pool_fields(CANDIDATE_POOL_CSV_PATH, appid=appid, updates=updates)
+            stats["updated"] += 1
+            continue
+
+        record = CandidatePoolRecord(**incoming)
+        upsert_candidate_pool_record(record, CANDIDATE_POOL_CSV_PATH)
+        stats["created"] += 1
+    return stats
+
+
+def render_steam_search_import_page() -> None:
+    st.subheader("Steam 搜索批量导入")
+    st.caption("用于从 Steam 搜索结果批量导入 AppID，例如 Coming Soon、Demo、热门即将推出等。默认限制数量，避免一次拉取过多噪音数据。")
+
+    source_options = ["Coming Soon 游戏", "Demo 池", "自定义 Steam 搜索 URL"]
+    config_cols = st.columns([1.2, 2.2, 1, 1])
+    source_label = config_cols[0].selectbox("导入来源", source_options, key="steam_search_import_source")
+    custom_url = ""
+    if source_label == "自定义 Steam 搜索 URL":
+        custom_url = config_cols[1].text_input(
+            "Steam 搜索 URL",
+            key="steam_search_import_custom_url",
+            placeholder="https://store.steampowered.com/search/?filter=comingsoon",
+        )
+    else:
+        config_cols[1].caption("使用 Steam 官方搜索分页接口，不依赖页面“显示更多”。")
+    max_apps = config_cols[2].selectbox(
+        "最大导入数量",
+        [20, 50, 100, 200, 500],
+        index=1,
+        format_func=lambda value: "500（高风险，不推荐）" if int(value) == 500 else str(value),
+        key="steam_search_import_max",
+    )
+    batch_count = config_cols[3].selectbox("每批数量", [20, 50, 100], index=1, key="steam_search_import_count")
+    sleep_seconds = config_cols[3].selectbox("请求间隔", [2, 3, 5], index=0, key="steam_search_import_sleep")
+    if int(max_apps) == 500:
+        st.warning("500 条可能触发 Steam 访问限制，不建议连续使用。建议优先使用 50 或 100。")
+    elif int(max_apps) == 200:
+        st.info("200 条适合单次较大筛选，建议间隔使用。")
+
+    action_cols = st.columns(5)
+    if action_cols[0].button("抓取 AppID", key="steam_search_import_fetch", use_container_width=True):
+        filter_name = ""
+        category1 = None
+        if source_label == "Coming Soon 游戏":
+            filter_name = "comingsoon"
+            category1 = "998"
+        elif source_label == "Demo 池":
+            category1 = "10"
+        if source_label == "自定义 Steam 搜索 URL" and not custom_url.strip():
+            st.warning("请先粘贴 Steam 搜索页 URL。")
+        else:
+            effective_max_apps = int(max_apps)
+            effective_count = min(int(batch_count), effective_max_apps)
+            result = fetch_steam_search_appids_with_stats(
+                filter_name=filter_name,
+                category1=category1,
+                search_url=custom_url,
+                import_source=source_label,
+                count=effective_count,
+                max_apps=effective_max_apps,
+                sleep_seconds=float(sleep_seconds),
+            )
+            records = result["rows"][:effective_max_apps]
+            clear_search_imports(STEAM_SEARCH_IMPORT_CSV_PATH)
+            stats = save_search_import_rows(STEAM_SEARCH_IMPORT_CSV_PATH, records)
+            if result["errors"]:
+                st.warning("部分批次抓取失败，已保留成功结果。接口结构变化时可改用 Steam 浏览器采集或手动 AppID 导入。")
+                st.caption("；".join(result["errors"][:3]))
+            st.success(f"抓取完成：本次 {len(records)} 条，新增 {stats['created']} 条，更新 {stats['updated']} 条。")
+
+    if action_cols[1].button("补全基础信息", key="steam_search_import_enrich", use_container_width=True):
+        try:
+            stats = enrich_search_imports_basic_info(STEAM_SEARCH_IMPORT_CSV_PATH)
+        except Exception as exc:
+            st.error(f"Steam 基础信息补全失败：{exc}")
+        else:
+            st.success(f"补全完成：请求 {stats['requested']} 个，成功 {stats['updated']} 个，失败 {stats['failed']} 个，缓存命中 {stats['cache_hit']} 个。")
+
+    if action_cols[2].button("清空本次导入", key="steam_search_import_clear", use_container_width=True):
+        stats = clear_search_imports(STEAM_SEARCH_IMPORT_CSV_PATH)
+        st.success(f"已清空本次导入：移除 {stats['removed']} 条。")
+
+    if action_cols[3].button("按 AppID 去重", key="steam_search_import_dedupe", use_container_width=True):
+        stats = dedupe_search_imports_by_appid(STEAM_SEARCH_IMPORT_CSV_PATH)
+        st.success(f"去重完成：before {stats['before']}，after {stats['after']}，removed {stats['removed']}。")
+
+    action_cols[4].caption(f"数据文件：{STEAM_SEARCH_IMPORT_CSV_PATH}")
+
+    data = apply_search_import_suggestions(load_search_imports(STEAM_SEARCH_IMPORT_CSV_PATH)).head(int(max_apps)).copy()
+    filter_cols = st.columns(6)
+    filtered = filter_search_imports(
+        data,
+        demo_only=filter_cols[0].checkbox("只看有 Demo", key="steam_search_filter_demo"),
+        unreleased_only=filter_cols[1].checkbox("只看未发售 / TBA", key="steam_search_filter_unreleased"),
+        self_published_only=filter_cols[2].checkbox("只看自发行", key="steam_search_filter_self"),
+        schinese_only=filter_cols[3].checkbox("只看支持简中", key="steam_search_filter_schinese"),
+        observation_only=filter_cols[4].checkbox("只看候选池观察 / 待试玩", key="steam_search_filter_observation"),
+        exclude_reference=filter_cols[5].checkbox("排除竞品参考", key="steam_search_filter_reference"),
+    )
+
+    selected_total = int(data["selected"].map(lambda value: str(value).strip().casefold() in {"1", "true", "yes", "y"} or str(value).strip() in {"是", "有"}).sum())
+    stat_cols = st.columns(5)
+    stat_cols[0].metric("本次抓取数量", len(data))
+    stat_cols[1].metric("去重后数量", data["appid"].nunique() if not data.empty else 0)
+    stat_cols[2].metric("当前筛选数量", len(filtered))
+    stat_cols[3].metric("已选择数量", selected_total)
+    stat_cols[4].caption(f"数据文件：{STEAM_SEARCH_IMPORT_CSV_PATH}")
+
+    if filtered.empty:
+        st.info("暂无 Steam 搜索导入记录。请先选择来源并抓取 AppID。")
+        return
+
+    select_cols = st.columns(6)
+    selection_actions = [
+        ("全选当前筛选结果", "select_visible"),
+        ("全选有 Demo", "select_demo"),
+        ("全选有 Demo + 自发行", "select_demo_self"),
+        ("全选未上线 + 有 Demo", "select_unreleased_demo"),
+        ("清空当前选择", "clear_visible"),
+        ("反选当前筛选结果", "invert_visible"),
+    ]
+    for index, (label, mode) in enumerate(selection_actions):
+        if select_cols[index].button(label, key=f"steam_search_bulk_select_{mode}", use_container_width=True):
+            bulk_update_search_import_selection(STEAM_SEARCH_IMPORT_CSV_PATH, filtered, mode)
+            st.session_state["steam_search_import_editor_version"] = int(st.session_state.get("steam_search_import_editor_version", 0)) + 1
+            data = apply_search_import_suggestions(load_search_imports(STEAM_SEARCH_IMPORT_CSV_PATH)).head(int(max_apps)).copy()
+            filtered = filter_search_imports(
+                data,
+                demo_only=st.session_state.get("steam_search_filter_demo", False),
+                unreleased_only=st.session_state.get("steam_search_filter_unreleased", False),
+                self_published_only=st.session_state.get("steam_search_filter_self", False),
+                schinese_only=st.session_state.get("steam_search_filter_schinese", False),
+                observation_only=st.session_state.get("steam_search_filter_observation", False),
+                exclude_reference=st.session_state.get("steam_search_filter_reference", False),
+            )
+
+    show_source_url = st.checkbox("显示来源页面列", value=False, key="steam_search_show_source_url")
+    display = search_import_display_data(filtered)
+    if not show_source_url and "来源页面" in display.columns:
+        display = display.drop(columns=["来源页面"])
+    column_config = {
+        "Steam 链接": st.column_config.LinkColumn("Steam 链接", display_text="打开 Steam"),
+    }
+    if "来源页面" in display.columns:
+        column_config["来源页面"] = st.column_config.LinkColumn("来源页面", display_text="来源页面")
+    edited = st.data_editor(
+        display,
+        key=f"steam_search_import_editor_{st.session_state.get('steam_search_import_editor_version', 0)}",
+        use_container_width=True,
+        hide_index=True,
+        disabled=[column for column in display.columns if column != "是否选择"],
+        column_config=column_config,
+    )
+    selected_display = edited.loc[edited["是否选择"].astype(bool)].copy() if "是否选择" in edited.columns else pd.DataFrame()
+    selected_appids = set(selected_display["AppID"].astype(str).str.strip()) if not selected_display.empty else set()
+    visible_appids = filtered["appid"].astype(str).str.strip().tolist()
+    update_search_import_selection(STEAM_SEARCH_IMPORT_CSV_PATH, visible_appids, list(selected_appids))
+    selected_rows = filtered.loc[filtered["appid"].astype(str).str.strip().isin(selected_appids)].copy()
+
+    send_cols = st.columns([1, 3])
+    if send_cols[0].button("发送选中项到候选池", key="steam_search_send_candidates", use_container_width=True):
+        if selected_rows.empty:
+            st.warning("请先选择要发送的项目。")
+        else:
+            stats = import_steam_search_rows_to_candidate_pool(selected_rows.to_dict("records"))
+            st.success(f"发送完成：新增 {stats['created']} 条，补空字段 {stats['updated']} 条，失败 {stats['failed']} 条。")
+            if stats["failed_rows"]:
+                st.caption("失败项：" + "；".join(stats["failed_rows"][:5]))
+    send_cols[1].caption(f"当前筛选 {len(filtered)} 条，已选择 {len(selected_rows)} 条。")
+
+
+def import_steam_search_rows_to_candidate_pool(rows: list[dict]) -> dict:
+    stats = {"created": 0, "updated": 0, "failed": 0, "failed_rows": []}
+    for row in rows:
+        appid = clean_candidate_value(row.get("appid"))
+        game_name = clean_candidate_value(row.get("game_name")) or (f"AppID {appid}" if appid else "")
+        if not appid:
+            stats["failed"] += 1
+            stats["failed_rows"].append(game_name or "未识别 AppID")
+            continue
+
+        steam_url = clean_candidate_value(row.get("steam_url")) or steam_url_from_appid(appid)
+        source_url = clean_candidate_value(row.get("source_page_url")) or steam_url
+        import_source = clean_candidate_value(row.get("import_source")) or "Steam 搜索批量导入"
+        suggestion = clean_candidate_value(row.get("import_suggestion"))
+        next_action = "试玩 Demo" if suggestion == "待试玩" else "补项目画像"
+        incoming = {
+            "appid": appid,
+            "game_name": game_name,
+            "steam_url": steam_url,
+            "steamdb_url": steamdb_app_url_from_appid(appid),
+            "developer": clean_candidate_value(row.get("developer")),
+            "publisher": clean_candidate_value(row.get("publisher")),
+            "release_status": clean_candidate_value(row.get("release_status") or row.get("release_date")),
+            "release_date": clean_candidate_value(row.get("release_date")),
+            "has_demo": clean_candidate_value(row.get("has_demo")),
+            "supports_schinese": clean_candidate_value(row.get("supports_schinese")),
+            "genres_tags": clean_candidate_value(row.get("genres_tags")),
+            "review_score": clean_candidate_value(row.get("review_score")),
+            "review_count": clean_candidate_value(row.get("review_count")),
+            "source": "Steam Search Import",
+            "source_url": source_url,
+            "next_action": next_action,
+            "stage": "新发现",
+            "priority": "未定",
+            "auto_suggestion": suggestion,
+            "auto_reason": clean_candidate_value(row.get("import_reason")),
+            "source_notes": f"来自 Steam 搜索批量导入：{import_source}",
         }
 
         existing = find_candidate_by_appid(CANDIDATE_POOL_CSV_PATH, appid)
@@ -9938,8 +11046,8 @@ def render_docs_status_page() -> None:
     st.subheader("文档与状态")
     st.markdown(
         """
-- 当前版本：V0.7.3 Steam 浏览器采集助手 P0
-- 数据文件：`data/projects.csv`、`data/candidate_pool.csv`、`data/steam_browser_collected.csv`、`data/competitors.csv`、`data/competitor_candidates.csv`、`data/external_intel.csv`
+- 当前版本：V0.7.4 高频入口与 Steam 批量导入收口版
+- 数据文件：`data/projects.csv`、`data/candidate_pool.csv`、`data/steam_browser_collected.csv`、`data/steam_search_imports.csv`、`data/competitors.csv`、`data/competitor_candidates.csv`、`data/external_intel.csv`
 - 图片目录：`data/snapshots/`
 - 报告目录：`reports/markdown/`、`reports/txt/`、`reports/excel/`、`reports/profile/`
 - 搜索中心导出目录：`exports/`
@@ -9950,6 +11058,7 @@ def render_docs_status_page() -> None:
         st.markdown(
             """
 - Steam 浏览器采集：`data/steam_browser_collected.csv`、`data/browser_profiles/steam_browser_collector/`
+- Steam 搜索批量导入：`data/steam_search_imports.csv`
 - SteamDB 与观察记录：`data/steamdb_watch_notes.csv`、`data/steamdb_link_templates.csv`、`data/new_store_events.csv`
 - 首页与观察缓存：`data/daily_watch_notes.csv`、`data/home_snapshots.csv`、`data/cache/home_feed_cache.json`
 - Steam 缓存：`data/cache/steam_home_feed_cache.json`、`data/cache/steam_appdetails_cache.json`、`data/cache/steam_review_stats_cache.json`、`data/cache/steam_images_cache.json`
@@ -9968,6 +11077,7 @@ def main() -> None:
     ensure_template_csv_exists(STEAMDB_TEMPLATE_CSV_PATH)
     ensure_watch_note_csv_exists(STEAMDB_WATCH_NOTE_CSV_PATH)
     load_new_store_events(NEW_STORE_EVENTS_CSV_PATH)
+    load_search_imports(STEAM_SEARCH_IMPORT_CSV_PATH)
     ensure_daily_watch_csv_exists(DAILY_WATCH_CSV_PATH)
     ensure_home_snapshot_csv_exists(HOME_SNAPSHOT_CSV_PATH)
     ensure_external_intel_csv_exists(EXTERNAL_INTEL_CSV_PATH)
@@ -9976,7 +11086,7 @@ def main() -> None:
     st.set_page_config(page_title="Steam 项目初筛助手", layout="wide")
 
     st.sidebar.title("Steam 项目初筛助手")
-    st.sidebar.info("当前版本：V0.7.3 Steam 浏览器采集助手 P0")
+    st.sidebar.info("当前版本：V0.7.4 高频入口与 Steam 批量导入收口版")
     st.sidebar.warning(
         "退出提醒\n\n"
         "- 关闭浏览器标签页不会关闭后台服务。\n"
@@ -9987,34 +11097,26 @@ def main() -> None:
         st.sidebar.code("停止_项目初筛助手.bat", language="bat")
 
     st.title("Steam 项目初筛助手")
-    st.caption("当前版本支持 Steam 浏览器采集、SteamDB 手动导入、候选池、基础信息补全和正式候选下载。")
+    st.caption("当前版本支持查查前置、Steam 浏览器采集、Steam 搜索批量导入、SteamDB 手动导入、候选池和基础信息补全。")
 
-    home_tab, workflow_tab, quick_tab, profile_tab, steamdb_tab, steamdb_import_tab, steam_browser_tab, new_store_tab, search_tab, demo_tab, competitor_tab, history_tab, docs_tab = st.tabs(
-        ["首页 / 今日看板", "今日工作流", "快速记录", "一键项目画像", "SteamDB 发现", "SteamDB 导入", "Steam 浏览器采集", "新上架监控", "搜索中心", "Demo 试玩", "竞品与候选", "历史与导出", "文档与状态"]
+    home_tab, chacha_tab, steam_browser_tab, steam_search_tab, steamdb_import_tab, competitor_tab, profile_tab, history_tab, docs_tab = st.tabs(
+        ["首页 / 项目发现 Feed", "查查", "Steam 浏览器采集", "Steam 搜索批量导入", "SteamDB 导入", "竞品与候选", "一键项目画像", "历史与导出", "文档与状态"]
     )
 
     with home_tab:
         render_home_dashboard_page()
-    with workflow_tab:
-        render_daily_workflow_page()
-    with quick_tab:
-        render_quick_record_page()
-    with profile_tab:
-        render_profile_draft_page()
-    with steamdb_tab:
-        render_steamdb_discovery_page()
-    with steamdb_import_tab:
-        render_steamdb_import_page()
+    with chacha_tab:
+        render_chacha_page()
     with steam_browser_tab:
         render_steam_browser_collector_page()
-    with new_store_tab:
-        render_new_store_monitor_page()
-    with search_tab:
-        render_search_center_page()
-    with demo_tab:
-        render_demo_review_page()
+    with steam_search_tab:
+        render_steam_search_import_page()
+    with steamdb_import_tab:
+        render_steamdb_import_page()
     with competitor_tab:
         render_competitor_candidate_page()
+    with profile_tab:
+        render_profile_draft_page()
     with history_tab:
         render_history_records()
     with docs_tab:

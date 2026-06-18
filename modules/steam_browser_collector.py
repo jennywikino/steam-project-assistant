@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 import os
 import re
+import shutil
 import socket
 import subprocess
 import urllib.error
@@ -14,7 +15,7 @@ import pandas as pd
 from modules.steam_app_enricher import enrich_appids_basic
 
 
-DEFAULT_STEAM_URL = "https://store.steampowered.com/search/?filter=comingsoon"
+DEFAULT_STEAM_URL = "https://store.steampowered.com/?l=schinese"
 DEFAULT_DEBUG_PORT = 9222
 CDP_CONNECT_ERROR_MESSAGE = "未检测到受控 Steam 浏览器，请先点击打开 Steam 浏览器。"
 STEAM_BROWSER_COLLECTED_COLUMNS = [
@@ -25,6 +26,7 @@ STEAM_BROWSER_COLLECTED_COLUMNS = [
     "source_page_title",
     "collected_at",
     "collect_method",
+    "selected",
     "developer",
     "publisher",
     "release_status",
@@ -265,6 +267,100 @@ def save_collected_rows(csv_path: Path, rows: list[dict]) -> dict:
     return stats
 
 
+def backup_collected_csv(csv_path: Path) -> Path:
+    ensure_collected_csv(csv_path)
+    backup_path = csv_path.with_name(f"{csv_path.stem}_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}{csv_path.suffix}")
+    shutil.copy2(csv_path, backup_path)
+    return backup_path
+
+
+def clear_collected_csv(csv_path: Path) -> dict:
+    backup_path = backup_collected_csv(csv_path)
+    before = len(load_collected(csv_path))
+    pd.DataFrame(columns=STEAM_BROWSER_COLLECTED_COLUMNS).to_csv(csv_path, index=False, encoding="utf-8-sig")
+    return {"before": before, "after": 0, "removed": before, "backup_path": str(backup_path)}
+
+
+def dedupe_collected_by_appid(csv_path: Path) -> dict:
+    backup_path = backup_collected_csv(csv_path)
+    data = load_collected(csv_path)
+    before = len(data)
+    if data.empty:
+        data.to_csv(csv_path, index=False, encoding="utf-8-sig")
+        return {"before": before, "after": 0, "removed": 0, "backup_path": str(backup_path)}
+
+    data = data.copy()
+    data["_row_order"] = range(len(data))
+    if "collected_at" in data.columns:
+        data["_collected_sort"] = pd.to_datetime(data["collected_at"], errors="coerce")
+        data = data.sort_values(["appid", "_collected_sort", "_row_order"], na_position="first")
+    else:
+        data = data.sort_values(["appid", "_row_order"])
+    data = data.drop_duplicates(subset=["appid"], keep="last")
+    data = data.sort_values("_row_order").drop(columns=[column for column in ["_row_order", "_collected_sort"] if column in data.columns])
+    data.to_csv(csv_path, index=False, encoding="utf-8-sig")
+    after = len(data)
+    return {"before": before, "after": after, "removed": before - after, "backup_path": str(backup_path)}
+
+
+def update_collected_selection(csv_path: Path, visible_appids: list[str], selected_appids: list[str]) -> dict:
+    data = load_collected(csv_path)
+    if data.empty:
+        return {"visible": 0, "selected": 0}
+
+    visible_set = {str(appid or "").strip() for appid in visible_appids if str(appid or "").strip()}
+    selected_set = {str(appid or "").strip() for appid in selected_appids if str(appid or "").strip()}
+    if not visible_set:
+        return {"visible": 0, "selected": int(_selected_mask(data).sum())}
+
+    appids = data["appid"].astype(str).str.strip()
+    visible_mask = appids.isin(visible_set)
+    data.loc[visible_mask, "selected"] = appids.loc[visible_mask].isin(selected_set).map(lambda value: "True" if value else "False")
+    data.to_csv(csv_path, index=False, encoding="utf-8-sig")
+    return {"visible": int(visible_mask.sum()), "selected": int(_selected_mask(data).sum())}
+
+
+def bulk_update_collected_selection(csv_path: Path, filtered: pd.DataFrame, mode: str) -> dict:
+    data = load_collected(csv_path)
+    if data.empty or filtered.empty:
+        return {"visible": 0, "selected": 0}
+
+    visible_appids = {
+        str(appid or "").strip()
+        for appid in filtered.get("appid", pd.Series(dtype=str)).astype(str).tolist()
+        if str(appid or "").strip()
+    }
+    if not visible_appids:
+        return {"visible": 0, "selected": int(_selected_mask(data).sum())}
+
+    current_selected = set(data.loc[_selected_mask(data), "appid"].astype(str).str.strip().tolist())
+    if mode == "select_visible":
+        next_selected = current_selected | visible_appids
+    elif mode == "select_demo":
+        next_selected = current_selected | _matching_appids(filtered, lambda row: _is_yes(row.get("has_demo")))
+    elif mode == "select_demo_self":
+        next_selected = current_selected | _matching_appids(filtered, lambda row: _is_yes(row.get("has_demo")) and _is_self_published(row))
+    elif mode == "select_unreleased_demo":
+        next_selected = current_selected | _matching_appids(filtered, lambda row: _is_yes(row.get("has_demo")) and _is_unreleased_v074(row))
+    elif mode == "clear_visible":
+        next_selected = current_selected - visible_appids
+    elif mode == "invert_visible":
+        next_selected = set(current_selected)
+        for appid in visible_appids:
+            if appid in next_selected:
+                next_selected.remove(appid)
+            else:
+                next_selected.add(appid)
+    else:
+        next_selected = current_selected
+
+    appids = data["appid"].astype(str).str.strip()
+    visible_mask = appids.isin(visible_appids)
+    data.loc[visible_mask, "selected"] = appids.loc[visible_mask].isin(next_selected).map(lambda value: "True" if value else "False")
+    data.to_csv(csv_path, index=False, encoding="utf-8-sig")
+    return {"visible": len(visible_appids), "selected": int(_selected_mask(data).sum())}
+
+
 def enrich_collected_basic_info(csv_path: Path, appids: list[str] | None = None) -> dict:
     data = load_collected(csv_path)
     if data.empty:
@@ -332,7 +428,7 @@ def filter_collected(
     if demo_only:
         filtered = filtered.loc[filtered["has_demo"].astype(str).str.strip().eq("是")]
     if unreleased_only:
-        filtered = filtered.loc[filtered.apply(lambda row: _is_unreleased(row.to_dict()), axis=1)]
+        filtered = filtered.loc[filtered.apply(lambda row: _is_unreleased_v074(row.to_dict()), axis=1)]
     if self_published_only:
         filtered = filtered.loc[filtered.apply(lambda row: _is_self_published(row.to_dict()), axis=1)]
     if schinese_only:
@@ -369,6 +465,31 @@ def collected_display_data(data: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def collected_display_data_v074(data: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for _, row in data.iterrows():
+        rows.append(
+            {
+                "是否选择": _truthy(row.get("selected")),
+                "游戏名": row.get("game_name", "") or f"AppID {row.get('appid', '')}",
+                "AppID": row.get("appid", ""),
+                "来源": row.get("source_page_title", "") or row.get("source_page_url", ""),
+                "开发商": row.get("developer", ""),
+                "发行商": row.get("publisher", ""),
+                "发售状态": row.get("release_status", "") or row.get("release_date", ""),
+                "Demo": row.get("has_demo", ""),
+                "简中": row.get("supports_schinese", ""),
+                "类型": row.get("genres_tags", ""),
+                "评测": row.get("review_score", ""),
+                "评论数": row.get("review_count", ""),
+                "导入建议": row.get("import_suggestion", ""),
+                "建议理由": row.get("import_reason", ""),
+                "Steam 链接": row.get("steam_url", ""),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def suggest_import(row: dict) -> tuple[str, str]:
     has_demo = _clean(row.get("has_demo")) == "是"
     supports_schinese = _clean(row.get("supports_schinese")) == "是"
@@ -378,7 +499,7 @@ def suggest_import(row: dict) -> tuple[str, str]:
 
     if _is_obvious_reference(row, review_count):
         return "竞品参考", "评论数较高或项目较成熟，适合作为竞品参考，不作为放弃判断。"
-    if has_demo and _is_unreleased(row):
+    if has_demo and _is_unreleased_v074(row):
         return "待试玩", "有 Demo 且仍处于未发售、Coming Soon 或 TBA 状态，适合进入试玩队列。"
     if has_demo and supports_schinese and developer and (not publisher or publisher == developer):
         return "候选池观察 / 值得联系", "有 Demo、支持简中，且看起来为开发商自发行或发行信息为空。"
@@ -488,6 +609,17 @@ def _is_unreleased(row: dict) -> bool:
     return any(token in text for token in ["coming soon", "tba", "to be announced", "即将推出", "未发售", "待定"])
 
 
+def _is_unreleased_v074(row: dict) -> bool:
+    text = " ".join([_clean(row.get("release_status")), _clean(row.get("release_date"))]).casefold()
+    tokens = ["coming soon", "tba", "to be announced", "即将推出", "未发售", "待定", "未来"]
+    if any(token in text for token in tokens):
+        return True
+    parsed_date = pd.to_datetime(_clean(row.get("release_date")), errors="coerce")
+    if pd.notna(parsed_date):
+        return parsed_date.date() > datetime.now().date()
+    return False
+
+
 def _is_self_published(row: dict) -> bool:
     developer = _clean(row.get("developer"))
     publisher = _clean(row.get("publisher"))
@@ -498,9 +630,33 @@ def _is_obvious_reference(row: dict, review_count: int) -> bool:
     if review_count >= 50000:
         return True
     status_text = " ".join([_clean(row.get("release_status")), _clean(row.get("release_date"))]).casefold()
-    if review_count >= 5000 and not _is_unreleased(row):
+    if review_count >= 5000 and not _is_unreleased_v074(row):
         return True
     return any(token in status_text for token in ["2018", "2019", "2020", "2021"])
+
+
+def _matching_appids(data: pd.DataFrame, predicate) -> set[str]:
+    matched: set[str] = set()
+    for _, row in data.iterrows():
+        row_dict = row.to_dict()
+        appid = _clean(row_dict.get("appid"))
+        if appid and predicate(row_dict):
+            matched.add(appid)
+    return matched
+
+
+def _selected_mask(data: pd.DataFrame) -> pd.Series:
+    if "selected" not in data.columns:
+        return pd.Series(False, index=data.index)
+    return data["selected"].map(_truthy)
+
+
+def _is_yes(value) -> bool:
+    return _clean(value) in {"是", "Yes", "yes", "true", "True", "1", "有", "有 Demo"}
+
+
+def _truthy(value) -> bool:
+    return str(value or "").strip().casefold() in {"1", "true", "yes", "y", "是", "有"}
 
 
 def _parse_int(value) -> int:
