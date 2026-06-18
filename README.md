@@ -15,9 +15,10 @@ Steam 项目初筛助手是一个面向独立游戏发行/运营场景的本地 
 ## 核心功能
 
 - 查查：Steam 链接 / AppID / 游戏名快速直查
-- Steam 浏览器采集：浏览 Steam 页面后抓当前页 AppID
-- Steam 搜索批量导入：Coming Soon / Demo 池保守分页导入
-- SteamDB 手动导入：粘贴 SteamDB 榜单 / AppID
+- 项目导入：统一承载 Steam 搜索导入、Steam 页面采集、SteamDB 粘贴导入
+- Steam 搜索导入：Coming Soon / Demo 池保守分页导入
+- Steam 页面采集：浏览 Steam 页面后抓当前页 AppID
+- SteamDB 粘贴导入：粘贴 SteamDB 榜单 / AppID
 - 基础信息补全：开发商、发行商、发售状态、Demo、简中、类型、评论
 - 发行判断建议：待试玩、潜力观察、竞品参考、待补资料
 - 候选池：状态管理、下一步动作、备注
@@ -46,7 +47,7 @@ Steam 项目初筛助手是一个面向独立游戏发行/运营场景的本地 
 - 不保存公司敏感数据
 - 不提交真实候选池数据
 - 不自动爬 SteamDB
-- Steam 搜索批量导入默认保守限速
+- Steam 搜索导入默认保守限速
 - 适合作为本地工作台，不是 SteamDB/VGI 替代品
 
 ## 截图
@@ -54,8 +55,9 @@ Steam 项目初筛助手是一个面向独立游戏发行/运营场景的本地 
 截图待补齐：
 
 - 首页
-- Steam 搜索批量导入
-- Steam 浏览器采集
+- 项目导入
+- Steam 搜索导入
+- Steam 页面采集
 - 候选池
 - Excel 导出
 
