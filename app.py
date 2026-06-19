@@ -1,8 +1,12 @@
 from pathlib import Path
 from datetime import datetime
 from difflib import SequenceMatcher
+import importlib.metadata
+import importlib.util
 import json
 import re
+import subprocess
+import sys
 from uuid import uuid4
 from urllib.parse import quote, urlparse
 import webbrowser
@@ -210,26 +214,21 @@ from modules.steam_appdetails_cache import (
 from modules.steam_app_enricher import enrich_appids_basic
 from modules.steam_browser_collector import (
     DEFAULT_STEAM_URL,
-    apply_import_suggestions,
-    bulk_update_collected_selection,
     browser_is_open,
     clear_collected_csv,
-    collect_current_app,
     collect_current_page_appids,
-    collected_display_data_v074,
-    dedupe_collected_by_appid,
     enrich_collected_basic_info,
-    filter_collected,
     launch_browser,
     load_collected,
-    playwright_available,
-    save_collected_rows,
-    update_collected_selection,
 )
 from modules.steam_search_importer import (
     apply_search_import_suggestions,
     bulk_update_search_import_selection,
     clear_search_imports,
+    chinese_support_status,
+    chinese_type_label,
+    compact_discovered_at,
+    content_type_label,
     dedupe_search_imports_by_appid,
     enrich_search_imports_basic_info,
     fetch_steam_search_appids_with_stats,
@@ -237,7 +236,9 @@ from modules.steam_search_importer import (
     load_search_imports,
     save_search_import_rows,
     search_import_display_data,
+    trial_status_label,
     update_search_import_selection,
+    validate_steam_search_url,
 )
 from modules.steam_data_normalizer import normalize_steam_game_data
 from modules.steam_review_stats import get_cached_review_stats
@@ -393,15 +394,15 @@ def matching_appids_for_selection(df: pd.DataFrame, mode: str) -> set[str]:
     if df.empty:
         return set()
     if mode == "select_demo":
-        target = df.loc[df["has_demo"].astype(str).str.strip().eq("是")]
+        target = df.loc[df.apply(lambda row: trial_status_label(row.to_dict()) in {"有", "自身为 Demo"}, axis=1)]
     elif mode == "select_demo_self":
         target = df.loc[
-            df["has_demo"].astype(str).str.strip().eq("是")
+            df.apply(lambda row: trial_status_label(row.to_dict()) in {"有", "自身为 Demo"}, axis=1)
             & df.apply(lambda row: is_self_published_candidate(row.to_dict()), axis=1)
         ]
     elif mode == "select_unreleased_demo":
         target = df.loc[
-            df["has_demo"].astype(str).str.strip().eq("是")
+            df.apply(lambda row: trial_status_label(row.to_dict()) in {"有", "自身为 Demo"}, axis=1)
             & df.apply(lambda row: is_unreleased_candidate(row.to_dict()), axis=1)
         ]
     else:
@@ -410,6 +411,9 @@ def matching_appids_for_selection(df: pd.DataFrame, mode: str) -> set[str]:
 
 
 def is_self_published_candidate(row: dict) -> bool:
+    for field in ["is_self_published", "self_published", "is_self_release", "self_published_flag"]:
+        if is_selected_value(row.get(field)):
+            return True
     developer = clean_candidate_value(row.get("developer"))
     publisher = clean_candidate_value(row.get("publisher"))
     if not developer or not publisher:
@@ -424,13 +428,14 @@ def is_unreleased_candidate(row: dict) -> bool:
     return any(keyword in text for keyword in ["coming soon", "to be announced", "tba", "即将推出", "待定", "未公布"])
 
 
-def update_selection_state_for_mode(key: str, filtered: pd.DataFrame, mode: str) -> set[str]:
+def update_selection_state_for_mode(key: str, filtered: pd.DataFrame, mode: str, *, replace_matches: bool = False) -> set[str]:
     current_selected = set(st.session_state.get(key) or set())
     visible_appids = appids_from_frame(filtered)
     if mode == "select_visible":
-        next_selected = current_selected | visible_appids
+        next_selected = visible_appids if replace_matches else current_selected | visible_appids
     elif mode in {"select_demo", "select_demo_self", "select_unreleased_demo"}:
-        next_selected = current_selected | matching_appids_for_selection(filtered, mode)
+        matching_appids = matching_appids_for_selection(filtered, mode)
+        next_selected = matching_appids if replace_matches else current_selected | matching_appids
     elif mode == "clear_visible":
         next_selected = current_selected - visible_appids
     elif mode == "invert_visible":
@@ -6877,7 +6882,7 @@ def render_home_chacha_result(card: dict) -> None:
         ]
         st.dataframe(pd.DataFrame(core_rows), use_container_width=True, hide_index=True)
 
-    action_cols = st.columns(5)
+    action_cols = st.columns(4)
     with action_cols[0]:
         if card.get("steam_url"):
             st.link_button("打开 Steam", card["steam_url"], use_container_width=True)
@@ -6885,12 +6890,9 @@ def render_home_chacha_result(card: dict) -> None:
         if card.get("steamdb_url"):
             st.link_button("打开 SteamDB", card["steamdb_url"], use_container_width=True)
     with action_cols[2]:
-        if st.button("发送到项目画像", key=f"chacha_result_send_profile_{card.get('appid')}", use_container_width=True):
-            send_chacha_result_to_profile(card, navigate=False)
-    with action_cols[3]:
-        if st.button("打开项目画像页", key=f"chacha_result_open_profile_{card.get('appid')}", use_container_width=True):
+        if st.button("项目画像", key=f"chacha_result_profile_{card.get('appid')}", use_container_width=True):
             send_chacha_result_to_profile(card, navigate=True)
-    with action_cols[4]:
+    with action_cols[3]:
         if st.button("保存为项目记录", key=f"chacha_result_save_project_{card.get('appid')}", use_container_width=True):
             save_quick_capture_project(card)
 
@@ -6977,12 +6979,7 @@ def render_chacha_lightweight_details(card: dict) -> None:
         except Exception:
             pass
     else:
-        fallback_cols = st.columns([3, 1, 1])
-        fallback_cols[0].caption("更多截图、评论和公告可在项目画像页补全。")
-        if fallback_cols[1].button("打开项目画像页", key=f"chacha_light_open_profile_{card.get('appid')}", use_container_width=True):
-            send_chacha_result_to_profile(card, navigate=True)
-        if fallback_cols[2].button("发送到项目画像", key=f"chacha_light_send_profile_{card.get('appid')}", use_container_width=True):
-            send_chacha_result_to_profile(card, navigate=False)
+        st.caption("更多截图、评论和公告可在项目画像页补全。")
 
 
 def render_chacha_screenshot_preview(screenshots: list[dict]) -> bool:
@@ -7258,6 +7255,15 @@ def send_chacha_result_to_profile(card: dict, navigate: bool = False) -> None:
     st.session_state["profile_focus_appid"] = appid
     st.session_state["profile_focus_steam_url"] = steam_url
     st.session_state["profile_focus_name"] = game_name
+    append_action_log(
+        ACTION_LOG_CSV_PATH,
+        action="发送项目画像",
+        appid=appid,
+        game_name=game_name,
+        detail="来自查查结果",
+        target_page="一键项目画像",
+        source_page="查查",
+    )
     if navigate:
         request_nav(
             "profile",
@@ -7851,8 +7857,8 @@ def render_home_direct_lookup_card(card: dict) -> None:
             if card.get("steamdb_url"):
                 st.link_button("打开 SteamDB", card["steamdb_url"], use_container_width=True)
         with profile_col:
-            if st.button("发送到项目画像", key=f"home_direct_lookup_profile_{card.get('appid')}", use_container_width=True):
-                send_home_direct_lookup_to_profile(card)
+            if st.button("项目画像", key=f"home_direct_lookup_profile_{card.get('appid')}", use_container_width=True):
+                send_chacha_result_to_profile(card, navigate=True)
         with clear_col:
             if st.button("清空结果", key=f"home_direct_lookup_card_clear_{card.get('appid')}", use_container_width=True):
                 st.session_state["home_direct_lookup_clear_requested"] = True
@@ -10376,7 +10382,8 @@ def render_import_selection_status(filtered_count: int, selected_count: int) -> 
 
 
 def render_import_action_bar(scope: str, selected_rows: pd.DataFrame, send_callback, selected_key: str, filtered: pd.DataFrame, position: str = "top") -> None:
-    cols = st.columns([1.3, 1, 1, 2])
+    browser_scope = scope == "steam_browser"
+    cols = st.columns([1.3, 1, 3] if browser_scope else [1.3, 1, 1, 2])
     if cols[0].button("发送到候选池", key=f"{scope}_send_candidates_bar_{position}", use_container_width=True):
         if selected_rows.empty:
             st.warning("请先选择要发送的项目。")
@@ -10387,14 +10394,18 @@ def render_import_action_bar(scope: str, selected_rows: pd.DataFrame, send_callb
             st.toast(f"已发送到候选池：新增 {stats.get('created', 0)}，补空字段 {stats.get('updated', 0)}，已存在 {stats.get('unchanged', 0)}，失败 {stats.get('failed', 0)}")
             st.rerun()
     if cols[1].button("查看已选项目", key=f"{scope}_show_selected_{position}", use_container_width=True):
-        st.session_state[f"{scope}_show_selected_preview"] = not bool(st.session_state.get(f"{scope}_show_selected_preview"))
+        if scope in {"steam_search", "steam_browser"}:
+            st.session_state[f"{scope}_show_selected_preview"] = True
+        else:
+            st.session_state[f"{scope}_show_selected_preview"] = not bool(st.session_state.get(f"{scope}_show_selected_preview"))
         st.rerun()
-    if cols[2].button("清空当前选择", key=f"{scope}_clear_selected_bar_{position}", use_container_width=True):
-        current = set(st.session_state.get(selected_key) or set())
-        next_selected = current - appids_from_frame(filtered)
-        set_selected_appids_state(selected_key, next_selected)
-        st.rerun()
-    cols[3].caption("下一步：筛选项目 -> 选择 -> 发送到候选池 -> 到竞品与候选继续跟进。")
+    if not browser_scope:
+        if cols[2].button("清空当前选择", key=f"{scope}_clear_selected_bar_{position}", use_container_width=True):
+            current = set(st.session_state.get(selected_key) or set())
+            next_selected = set() if scope == "steam_search" else current - appids_from_frame(filtered)
+            set_selected_appids_state(selected_key, next_selected)
+            st.rerun()
+    cols[2 if browser_scope else 3].caption("下一步：筛选项目 -> 选择 -> 发送到候选池 -> 到竞品与候选继续跟进。")
 
 
 def import_preview_dataframe(rows: pd.DataFrame, limit: int) -> pd.DataFrame:
@@ -10418,15 +10429,89 @@ def first_import_value(row: dict, fields: list[str]) -> str:
     return "待补资料"
 
 
+def format_full_discovered_at(row: dict) -> str:
+    value = first_import_value(row, ["first_seen_at", "collected_at", "source_page_title"])
+    parsed = pd.to_datetime(value, errors="coerce")
+    if pd.notna(parsed):
+        return parsed.strftime("%Y.%m.%d %H:%M:%S")
+    return "—" if value == "待补资料" else value
+
+
+def steam_browser_content_label(row: dict) -> str:
+    return {
+        "Tool": "工具",
+        "Artbook": "艺术集",
+        "OST": "原声",
+    }.get(content_type_label(row), content_type_label(row))
+
+
+def steam_browser_display_data(data: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for index, (_, source_row) in enumerate(data.iterrows(), start=1):
+        row = source_row.to_dict()
+        appid = clean_candidate_value(row.get("appid"))
+        game_name = clean_candidate_value(row.get("game_name")) or f"AppID {appid}"
+        steam_url = clean_candidate_value(row.get("steam_url")) or steam_url_from_appid(appid)
+        profile_url = (
+            f"?import_action=profile&appid={quote(appid)}&game_name={quote(game_name)}&steam_url={quote(steam_url)}"
+        )
+        rows.append(
+            {
+                "序号": index,
+                "选择": is_selected_value(row.get("selected")),
+                "头图": clean_candidate_value(row.get("header_image") or row.get("image_url")),
+                "游戏名": game_name,
+                "AppID": appid,
+                "首次发现": compact_discovered_at(row.get("collected_at") or row.get("first_seen_at")),
+                "开发": clean_candidate_value(row.get("developer")) or "待补",
+                "发行": clean_candidate_value(row.get("publisher")) or "待补",
+                "发售": clean_candidate_value(row.get("release_status") or row.get("release_date")) or "待补",
+                "内容": steam_browser_content_label(row),
+                "试玩": trial_status_label(row),
+                "中文": chinese_support_status(row),
+                "类型": clean_candidate_value(row.get("genres_tags") or row.get("genres") or row.get("tags")) or "待补",
+                "Steam": steam_url,
+                "项目画像": profile_url,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def render_steam_browser_dangerous_actions() -> None:
+    with st.expander("危险操作 / 清理数据", expanded=False):
+        st.caption("只清空本次页面采集列表，不影响候选池和项目画像。")
+        confirm_clear = st.checkbox(
+            "我确认清空本次采集",
+            key="steam_browser_confirm_clear_collected",
+        )
+        if st.button("清空本次采集", key="steam_browser_clear_collected", disabled=not confirm_clear):
+            stats = clear_collected_csv(STEAM_BROWSER_COLLECTED_CSV_PATH)
+            st.session_state["steam_browser_last_rows"] = []
+            set_selected_appids_state("steam_browser_selected_appids", set())
+            st.session_state["steam_browser_display_reset"] = int(st.session_state.get("steam_browser_display_reset", 0)) + 1
+            st.toast(f"已清空本次采集：移除 {stats['removed']} 条。")
+            st.rerun()
+
+
 def render_selected_import_preview(scope: str, selected_rows: pd.DataFrame) -> None:
     if not st.session_state.get(f"{scope}_show_selected_preview"):
         return
-    st.markdown("#### 已选项目预览")
+    if scope in {"steam_search", "steam_browser"}:
+        title_cols = st.columns([4, 1])
+        title_cols[0].markdown("#### 已选项目预览")
+        if title_cols[1].button("收起已选项目", key=f"{scope}_hide_selected_preview", use_container_width=True):
+            st.session_state[f"{scope}_show_selected_preview"] = False
+            st.rerun()
+    else:
+        st.markdown("#### 已选项目预览")
     if selected_rows.empty:
         st.info("当前没有已选项目。")
         return
+    preview_data = import_preview_dataframe(selected_rows, 30)
+    if scope in {"steam_search", "steam_browser"}:
+        preview_data = preview_data.drop(columns=[column for column in ["导入建议", "建议理由"] if column in preview_data.columns])
     st.dataframe(
-        import_preview_dataframe(selected_rows, 30),
+        preview_data,
         use_container_width=True,
         hide_index=True,
         column_config={"Steam 链接": st.column_config.LinkColumn("Steam 链接", display_text="打开 Steam")},
@@ -10435,44 +10520,97 @@ def render_selected_import_preview(scope: str, selected_rows: pd.DataFrame) -> N
         st.caption("仅展示前 30 条，完整列表发送到候选池后可查看。")
 
 
-def render_import_snapshot(scope: str, selected_rows: pd.DataFrame, send_callback) -> None:
-    st.markdown("#### 当前项目快照")
-    if selected_rows.empty:
-        st.info("选择一个项目后，可在这里查看标准信息。")
+def render_import_snapshot(scope: str, selected_rows: pd.DataFrame, send_callback, fallback_rows: pd.DataFrame | None = None) -> None:
+    preview_rows = selected_rows.copy()
+    compact_scope = scope in {"steam_search", "steam_browser"}
+    if compact_scope and preview_rows.empty and fallback_rows is not None:
+        preview_rows = fallback_rows.head(50).copy()
+    if preview_rows.empty:
+        st.markdown("#### 当前项目快照")
+        st.info("当前没有可预览项目。" if compact_scope else "选择一个项目后，可在这里查看标准信息。")
         return
-    row = selected_rows.iloc[0].to_dict()
+    preview_rows = preview_rows.reset_index(drop=True)
+    preview_index = 0
+    header_cols = None
+    if compact_scope:
+        preview_options = list(range(len(preview_rows)))
+        preview_labels = {}
+        for index, preview_row in preview_rows.iterrows():
+            preview_appid = clean_candidate_value(preview_row.get("appid"))
+            preview_name = clean_candidate_value(preview_row.get("game_name") or preview_row.get("name") or preview_row.get("title")) or f"AppID {preview_appid}"
+            preview_labels[index] = f"{index + 1}. {preview_name} | {preview_appid}"
+        header_cols = st.columns([2, 1])
+        preview_index = header_cols[1].selectbox(
+            "选择预览项目",
+            preview_options,
+            format_func=lambda value: preview_labels[value],
+            key=f"{scope}_snapshot_preview_index",
+        )
+    row = preview_rows.iloc[int(preview_index)].to_dict()
     appid = clean_candidate_value(row.get("appid"))
     game_name = clean_candidate_value(row.get("game_name") or row.get("name") or row.get("title")) or (f"AppID {appid}" if appid else "待补资料")
+    if compact_scope:
+        header_cols[0].markdown(f"#### 当前项目快照：{int(preview_index) + 1}. {game_name}")
+    else:
+        st.markdown("#### 当前项目快照")
     steam_url = clean_candidate_value(row.get("steam_url")) or steam_url_from_appid(appid)
-    snapshot_rows = [
-        {"字段": "游戏名", "内容": game_name},
-        {"字段": "AppID", "内容": appid or "待补资料"},
-        {"字段": "Steam 链接", "内容": steam_url or "待补资料"},
-        {"字段": "开发商", "内容": first_import_value(row, ["developer"])},
-        {"字段": "发行商", "内容": first_import_value(row, ["publisher"])},
-        {"字段": "发售状态 / 发售日期", "内容": first_import_value(row, ["release_status", "release_date"])},
-        {"字段": "Demo", "内容": first_import_value(row, ["has_demo"])},
-        {"字段": "简中", "内容": first_import_value(row, ["supports_schinese"])},
-        {"字段": "类型", "内容": first_import_value(row, ["genres_tags", "genres", "tags"])},
-        {"字段": "评论数 / 评价", "内容": " / ".join(value for value in [first_import_value(row, ["review_count", "reviews"]), first_import_value(row, ["review_score", "rating"])] if value != "待补资料") or "待补资料"},
-        {"字段": "导入建议", "内容": first_import_value(row, ["import_suggestion", "auto_suggestion", "monitor_suggestion"])},
-        {"字段": "建议理由", "内容": first_import_value(row, ["import_reason", "auto_reason", "monitor_reason"])},
-        {"字段": "下一步动作", "内容": first_import_value(row, ["next_action"])},
-    ]
+    header_image = clean_candidate_value(row.get("header_image") or row.get("image_url"))
+    if compact_scope and header_image:
+        st.image(header_image, width=320)
+    if compact_scope:
+        snapshot_rows = [
+            {"字段": "游戏名", "内容": game_name},
+            {"字段": "AppID", "内容": appid or "待补"},
+            {"字段": "Steam 链接", "内容": steam_url or "待补"},
+            {"字段": "开发商", "内容": first_import_value(row, ["developer"])},
+            {"字段": "发行商", "内容": first_import_value(row, ["publisher"])},
+            {"字段": "工具发现时间", "内容": format_full_discovered_at(row)},
+            {"字段": "发售状态 / 发售日期", "内容": first_import_value(row, ["release_status", "release_date"])},
+            {"字段": "内容类型", "内容": steam_browser_content_label(row) if scope == "steam_browser" else content_type_label(row)},
+            {"字段": "试玩状态", "内容": trial_status_label(row)},
+            {"字段": "中文", "内容": chinese_support_status(row)},
+            {"字段": "中文类型", "内容": chinese_type_label(row)},
+            {"字段": "类型", "内容": first_import_value(row, ["genres_tags", "genres", "tags"])},
+            {"字段": "价格", "内容": clean_candidate_value(row.get("price")) or "待补"},
+        ]
+    else:
+        snapshot_rows = [
+            {"字段": "游戏名", "内容": game_name},
+            {"字段": "AppID", "内容": appid or "待补资料"},
+            {"字段": "Steam 链接", "内容": steam_url or "待补资料"},
+            {"字段": "开发商", "内容": first_import_value(row, ["developer"])},
+            {"字段": "发行商", "内容": first_import_value(row, ["publisher"])},
+            {"字段": "发售状态 / 发售日期", "内容": first_import_value(row, ["release_status", "release_date"])},
+            {"字段": "Demo", "内容": first_import_value(row, ["has_demo"])},
+            {"字段": "简中", "内容": first_import_value(row, ["supports_schinese"])},
+            {"字段": "类型", "内容": first_import_value(row, ["genres_tags", "genres", "tags"])},
+            {"字段": "评论数 / 评价", "内容": " / ".join(value for value in [first_import_value(row, ["review_count", "reviews"]), first_import_value(row, ["review_score", "rating"])] if value != "待补资料") or "待补资料"},
+        ]
+        snapshot_rows.extend(
+            [
+                {"字段": "导入建议", "内容": first_import_value(row, ["import_suggestion", "auto_suggestion", "monitor_suggestion"])},
+                {"字段": "建议理由", "内容": first_import_value(row, ["import_reason", "auto_reason", "monitor_reason"])},
+                {"字段": "下一步动作", "内容": first_import_value(row, ["next_action"])},
+            ]
+        )
     st.dataframe(pd.DataFrame(snapshot_rows), use_container_width=True, hide_index=True)
-    action_cols = st.columns(4)
+    action_cols = st.columns(3 if compact_scope else 4)
     with action_cols[0]:
         if steam_url:
             st.link_button("打开 Steam", steam_url, use_container_width=True)
-    if action_cols[1].button("查查", key=f"{scope}_snapshot_chacha_{appid}", use_container_width=True):
-        st.session_state["pending_lookup_prefill"] = {"lookup_input": steam_url or appid or game_name, "source": "项目导入快照"}
-        request_nav("search")
-    if action_cols[2].button("项目画像", key=f"{scope}_snapshot_profile_{appid}", use_container_width=True):
+    profile_col = 1
+    if not compact_scope:
+        if action_cols[1].button("查查", key=f"{scope}_snapshot_chacha_{appid}", use_container_width=True):
+            st.session_state["pending_lookup_prefill"] = {"lookup_input": steam_url or appid or game_name, "source": "项目导入快照"}
+            request_nav("search")
+        profile_col = 2
+    if action_cols[profile_col].button("项目画像", key=f"{scope}_snapshot_profile_{appid}", use_container_width=True):
         set_profile_prefill_from_mapping({**row, "appid": appid, "game_name": game_name, "steam_url": steam_url}, source_context="项目导入快照")
         request_nav("profile", profile_focus_appid=appid, profile_focus_name=game_name, profile_focus_steam_url=steam_url)
     existing = find_candidate_by_appid(CANDIDATE_POOL_CSV_PATH, appid) if appid else {}
     candidate_label = "已在候选池" if existing else "加入候选池"
-    if action_cols[3].button(candidate_label, key=f"{scope}_snapshot_candidate_{appid}", use_container_width=True, disabled=bool(existing)):
+    candidate_col = 2 if compact_scope else 3
+    if action_cols[candidate_col].button(candidate_label, key=f"{scope}_snapshot_candidate_{appid}", use_container_width=True, disabled=bool(existing)):
         batch_id = make_import_batch_id()
         stats = send_callback([row], batch_id=batch_id)
         st.session_state[f"{scope}_send_result"] = stats
@@ -10500,27 +10638,32 @@ def render_import_send_result_panel(scope: str) -> None:
     if action_cols[1].button("查看本次入池项目", key=f"{scope}_toggle_send_details", use_container_width=True):
         st.session_state[f"{scope}_show_send_details"] = not bool(st.session_state.get(f"{scope}_show_send_details", True))
         st.rerun()
-    if action_cols[2].button("继续导入", key=f"{scope}_continue_import", use_container_width=True):
+    continue_label = "返回导入列表" if scope in {"steam_search", "steam_browser"} else "继续导入"
+    if action_cols[2].button(continue_label, key=f"{scope}_continue_import", use_container_width=True):
         st.session_state.pop(f"{scope}_send_result", None)
         st.rerun()
     show_details = st.session_state.get(f"{scope}_show_send_details", True)
     if show_details:
         details = stats.get("details", []) if isinstance(stats.get("details"), list) else []
         if details:
-            display = pd.DataFrame(
-                [
-                    {
+            detail_rows = []
+            for item in details[:50]:
+                detail_row = {
                         "游戏名": item.get("game_name", ""),
                         "AppID": item.get("appid", ""),
                         "处理结果": item.get("result", ""),
                         "失败原因": item.get("reason", ""),
-                        "下一步建议": item.get("next_action", ""),
                         "Steam": item.get("steam_url", ""),
-                        "候选池": "竞品与候选",
-                    }
-                    for item in details[:50]
-                ]
-            )
+                }
+                if scope in {"steam_search", "steam_browser"}:
+                    detail_row["候选池状态"] = {"created": "已入池", "updated": "已存在", "unchanged": "已存在", "failed": "失败"}.get(item.get("result_key", ""), "失败")
+                else:
+                    detail_row["下一步建议"] = item.get("next_action", "")
+                    detail_row["候选池"] = "竞品与候选"
+                detail_rows.append(detail_row)
+            display = pd.DataFrame(detail_rows)
+            if scope in {"steam_search", "steam_browser"}:
+                display.insert(0, "序号", range(1, len(display) + 1))
             st.dataframe(
                 display,
                 use_container_width=True,
@@ -11151,22 +11294,133 @@ def render_steamdb_import_section() -> None:
             )
 
 
+STEAM_BROWSER_INSTALL_COMMANDS = (
+    ".\\.venv\\Scripts\\python.exe -m pip install playwright\n"
+    ".\\.venv\\Scripts\\python.exe -m playwright install chromium"
+)
+
+
+def check_playwright_environment() -> dict:
+    result = {
+        "ok": False,
+        "python_executable": sys.executable,
+        "playwright_installed": False,
+        "playwright_version": "",
+        "chromium_launch_ok": False,
+        "error": "",
+    }
+    if importlib.util.find_spec("playwright") is None:
+        result["error"] = "当前 Python 环境未安装 Playwright。"
+        return result
+    result["playwright_installed"] = True
+    try:
+        result["playwright_version"] = importlib.metadata.version("playwright")
+    except importlib.metadata.PackageNotFoundError:
+        result["playwright_version"] = "未知"
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            browser.close()
+        result["chromium_launch_ok"] = True
+        result["ok"] = True
+    except Exception as exc:
+        result["error"] = str(exc)
+    return result
+
+
+def install_steam_browser_environment() -> tuple[bool, str]:
+    python_path = Path(sys.executable)
+    commands = [
+        [str(python_path), "-m", "pip", "install", "playwright"],
+        [str(python_path), "-m", "playwright", "install", "chromium"],
+    ]
+    output: list[str] = []
+    for command in commands:
+        output.append("> " + " ".join(command))
+        try:
+            result = subprocess.run(
+                command,
+                cwd=BASE_DIR,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=1800,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            output.append(str(exc))
+            return False, "\n".join(output)
+        if result.stdout:
+            output.append(result.stdout.strip())
+        if result.stderr:
+            output.append(result.stderr.strip())
+        if result.returncode != 0:
+            output.append(f"命令退出码：{result.returncode}")
+            return False, "\n".join(output)
+    return True, "\n".join(output)
+
+
+def render_playwright_environment_diagnostics(environment: dict) -> None:
+    with st.expander("查看环境诊断", expanded=False):
+        st.write(f"当前 Python：{environment.get('python_executable') or '未知'}")
+        st.write(f"Playwright 包：{'已安装' if environment.get('playwright_installed') else '未安装'}")
+        st.write(f"Playwright 版本：{environment.get('playwright_version') or '未获取'}")
+        st.write(f"Chromium 启动：{'成功' if environment.get('chromium_launch_ok') else '失败'}")
+        if environment.get("error"):
+            st.code(str(environment.get("error")), language="text")
+
+
 def render_steam_browser_collector_page() -> None:
     st.subheader("Steam 页面采集")
-    st.caption("适合用户手动打开 Steam 页面、新品节、搜索页或标签页后，抓取当前页面中的 AppID。")
-    st.caption(
-        "打开一个受控浏览器窗口，用户在其中浏览 Steam 商店、搜索页、新品节、Coming Soon、标签页等页面；"
-        "工具读取当前页面里的 Steam app 链接并导入候选池。"
+    st.info(
+        "**Steam 页面采集适合抓取：** 榜单页、搜索结果页、分类页、标签页，以及活动页里的游戏列表。　"
+        "**不建议用于：** Steam 首页、新品节首页顶部、Explore/New 首页和单个 App 详情页。\n\n"
+        "单个游戏请复制 Steam URL 或游戏名，进入“项目画像”查询。"
     )
-    st.caption("本页不抓 SteamDB、不做反爬对抗、不伪装登录，也不读取 Streamlit iframe DOM。")
-    st.info("SteamDB 自动抓取入口已下线。SteamDB 仍可通过项目导入里的“SteamDB 粘贴导入”进行手动粘贴导入；新项目发现优先使用“Steam 页面采集”。")
+    st.caption(
+        "这是工具专用浏览器，不读取你平时 Chrome / Edge 的 Steam 登录状态。"
+        "页面采集只读取当前工具浏览器中的 Steam 页面链接。"
+    )
 
-    if not playwright_available():
-        st.error("当前环境未安装 Playwright，Steam 页面采集不可用。")
-        st.code("pip install playwright\nplaywright install chromium", language="bash")
+    environment = check_playwright_environment()
+    if not environment.get("ok"):
+        st.error(
+            "**缺少 Steam 页面采集环境**\n\n"
+            "Steam 页面采集需要本地浏览器自动化环境。当前电脑还没有安装 Playwright / Chromium，所以页面采集暂不可用。\n\n"
+            "你可以：\n"
+            "1. 点击下方“自动安装采集环境”\n"
+            "2. 或在项目根目录运行“安装采集环境.bat”\n"
+            "3. 安装完成后重启工具"
+        )
+        install_cols = st.columns(2)
+        if install_cols[0].button("自动安装采集环境", key="steam_browser_install_environment", use_container_width=True):
+            with st.spinner("正在安装 Playwright 和 Chromium，请稍候……"):
+                success, output = install_steam_browser_environment()
+            if success:
+                environment = check_playwright_environment()
+                if environment.get("ok"):
+                    st.success("采集环境已可用，请刷新页面或重新进入 Steam 页面采集。")
+                else:
+                    st.error("安装命令已完成，但当前 Python 仍无法启动 Chromium。请查看环境诊断。")
+                if output:
+                    with st.expander("查看安装输出", expanded=False):
+                        st.code(output[-12000:], language="text")
+            else:
+                st.error("自动安装失败。请查看错误输出，或运行项目根目录的“安装采集环境.bat”。")
+                st.code(output[-12000:] if output else "未获取到错误输出。", language="text")
+        if install_cols[1].button("显示手动安装命令", key="steam_browser_show_install_commands_button", use_container_width=True):
+            st.session_state["steam_browser_show_install_commands_visible"] = True
+        if st.session_state.get("steam_browser_show_install_commands_visible"):
+            st.code(STEAM_BROWSER_INSTALL_COMMANDS, language="powershell")
+        render_playwright_environment_diagnostics(environment)
         return
 
-    action_cols = st.columns(4)
+    st.markdown("#### 页面采集")
+    st.caption("打开列表页后抓取页面游戏；抓取成功会自动按 AppID 合并或更新，并进入本次采集表。")
+    action_cols = st.columns(3)
     if action_cols[0].button("打开 Steam 浏览器", key="steam_browser_open", use_container_width=True):
         result = launch_browser(STEAM_BROWSER_USER_DATA_DIR, DEFAULT_STEAM_URL)
         st.session_state["steam_browser_running"] = bool(result.get("browser_running"))
@@ -11176,15 +11430,20 @@ def render_steam_browser_collector_page() -> None:
         else:
             st.error(result.get("message", "Steam 浏览器启动失败。"))
 
-    if action_cols[1].button("抓取当前页 AppID", key="steam_browser_collect_page", use_container_width=True):
+    if action_cols[1].button("抓取页面列表", key="steam_browser_collect_page", use_container_width=True):
         result = collect_current_page_appids(STEAM_BROWSER_COLLECTED_CSV_PATH, STEAM_BROWSER_DEBUG_PORT)
         if result.get("success"):
             st.session_state["steam_browser_last_rows"] = result.get("rows", [])
             stats = result.get("save_stats", {})
             suffix = f" 已保存：新增 {stats.get('created', 0)} 条，更新 {stats.get('updated', 0)} 条。" if stats else ""
-            st.success(result.get("message", "已抓取当前页 AppID。") + suffix)
+            st.success(result.get("message", "已抓取页面列表。") + suffix)
         else:
-            st.warning(result.get("message", "当前页面未发现 Steam app 链接，请滚动或打开具体游戏页后再试。"))
+            st.warning(
+                result.get(
+                    "message",
+                    "当前页面未识别到可导入的 Steam 游戏列表。请切换到搜索页、榜单页、标签页、分类页或活动页具体列表区域；单个游戏请复制 URL 或游戏名到项目画像。",
+                )
+            )
 
     last_rows = st.session_state.get("steam_browser_last_rows", [])
     if action_cols[2].button("补全基础信息", key="steam_browser_enrich", use_container_width=True):
@@ -11197,133 +11456,119 @@ def render_steam_browser_collector_page() -> None:
                 f"补全完成：请求 {stats['requested']} 个，成功 {stats['updated']} 个，"
                 f"失败 {stats['failed']} 个，缓存命中 {stats['cache_hit']} 个。"
             )
+    st.caption("补全开发、发行、内容类型、试玩、中文、发售、价格等字段；评测仅对当前快照轻量兜底。")
 
     is_browser_running = browser_is_open(STEAM_BROWSER_DEBUG_PORT)
     st.session_state["steam_browser_running"] = is_browser_running
     st.session_state["steam_browser_debug_port"] = STEAM_BROWSER_DEBUG_PORT
     st.caption(f"浏览器状态：{'已打开' if is_browser_running else '未打开'}")
 
-    with st.expander("低频采集操作", expanded=False):
-        low_cols = st.columns(2)
-        if low_cols[0].button("抓取当前打开游戏", key="steam_browser_collect_app", use_container_width=True):
-            result = collect_current_app(STEAM_BROWSER_COLLECTED_CSV_PATH, STEAM_BROWSER_DEBUG_PORT)
-            if result.get("success"):
-                st.session_state["steam_browser_last_rows"] = result.get("rows", [])
-                stats = result.get("save_stats", {})
-                suffix = f" 已保存：新增 {stats.get('created', 0)} 条，更新 {stats.get('updated', 0)} 条。" if stats else ""
-                st.success(result.get("message", "已抓取当前打开游戏。") + suffix)
-            else:
-                st.warning(result.get("message", "当前打开页面不是 Steam app 页面。"))
-        if low_cols[1].button("保存本次采集", key="steam_browser_save", use_container_width=True):
-            if not last_rows:
-                st.warning("请先抓取当前页 AppID 或当前打开游戏。")
-            else:
-                stats = save_collected_rows(STEAM_BROWSER_COLLECTED_CSV_PATH, last_rows)
-                st.success(f"已保存：新增 {stats['created']} 条，更新 {stats['updated']} 条，当前共 {stats['total']} 条。")
-
     if last_rows:
-        with st.expander(f"本次抓取预览（{len(last_rows)} 条，保存后进入下方表格）", expanded=False):
+        with st.expander(f"本次抓取预览（{len(last_rows)} 条，已自动保存）", expanded=False):
             st.dataframe(pd.DataFrame(last_rows), use_container_width=True, hide_index=True)
 
-    st.markdown("#### 数据管理")
-    cleanup_cols = st.columns([1, 1, 1, 2])
-    if cleanup_cols[2].button("按 AppID 去重", key="steam_browser_dedupe_collected", use_container_width=True):
-        stats = dedupe_collected_by_appid(STEAM_BROWSER_COLLECTED_CSV_PATH)
-        selected_key = "steam_browser_selected_appids"
-        current_selected = set(st.session_state.get(selected_key) or set())
-        data_after_dedupe = load_collected(STEAM_BROWSER_COLLECTED_CSV_PATH)
-        set_selected_appids_state(selected_key, current_selected & appids_from_frame(data_after_dedupe))
-        st.success(
-            "去重完成："
-            f"before {stats['before']}，after {stats['after']}，removed {stats['removed']}。"
-            f"备份：{stats['backup_path']}"
-        )
-    confirm_clear = cleanup_cols[3].checkbox(
-        "我确认清空本次采集",
-        key="steam_browser_confirm_clear_collected",
-        help="会清空 data/steam_browser_collected.csv；清空前会自动备份，不会修改 candidate_pool.csv。",
-    )
-    if cleanup_cols[3].button("清空本次采集", key="steam_browser_clear_collected", use_container_width=True):
-        if not confirm_clear:
-            st.warning("清空前请先勾选确认。此操作只清空 data/steam_browser_collected.csv，不会修改 candidate_pool.csv。")
-        else:
-            stats = clear_collected_csv(STEAM_BROWSER_COLLECTED_CSV_PATH)
-            st.session_state["steam_browser_last_rows"] = []
-            set_selected_appids_state("steam_browser_selected_appids", set())
-            st.session_state["steam_browser_display_reset"] = int(st.session_state.get("steam_browser_display_reset", 0)) + 1
-            st.success(
-                "已清空本次采集："
-                f"before {stats['before']}，after {stats['after']}，removed {stats['removed']}。"
-                f"备份：{stats['backup_path']}"
-            )
-
-    data = apply_import_suggestions(load_collected(STEAM_BROWSER_COLLECTED_CSV_PATH))
-    filter_cols = st.columns(6)
-    filtered = filter_collected(
-        data,
-        demo_only=filter_cols[0].checkbox("只看有 Demo", key="steam_browser_filter_demo"),
-        unreleased_only=filter_cols[1].checkbox("只看未发售 / TBA", key="steam_browser_filter_unreleased"),
-        self_published_only=filter_cols[2].checkbox("只看自发行", key="steam_browser_filter_self"),
-        schinese_only=filter_cols[3].checkbox("只看支持简中", key="steam_browser_filter_schinese"),
-        observation_only=filter_cols[4].checkbox("只看候选池观察 / 待试玩", key="steam_browser_filter_observation"),
-        exclude_reference=filter_cols[5].checkbox("排除竞品参考", key="steam_browser_filter_reference"),
-    )
-
-    if filtered.empty:
-        st.info("暂无 Steam 页面采集记录。请先打开 Steam 浏览器并抓取当前页 AppID。")
-        return
-
+    data = load_collected(STEAM_BROWSER_COLLECTED_CSV_PATH)
     selected_key = "steam_browser_selected_appids"
     selected_appids = ensure_selected_appids_state(selected_key, data)
     selected_appids = selected_appids & appids_from_frame(data)
     set_selected_appids_state(selected_key, selected_appids)
 
-    selected_rows_for_send = import_rows_selected_by_appids(filtered, selected_appids)
-    st.caption("采集记录较多时，页面默认只展示前 100 条。可用筛选和批量选择后发送候选池。")
-    render_import_selection_status(len(filtered), len(selected_appids & appids_from_frame(filtered)))
-    render_import_action_bar("steam_browser", selected_rows_for_send, import_steam_browser_rows_to_candidate_pool, selected_key, filtered, position="top")
+    st.markdown("#### 本地结果筛选")
+    st.caption("以下筛选只作用于本次采集结果，不会新增 Steam 请求。")
+    filter_cols = st.columns(4)
+    state_filter_cols = st.columns(3)
+    only_trial = filter_cols[0].checkbox("只有试玩", key="steam_browser_filter_demo", help="包含有试玩版的游戏和 Demo App。")
+    only_unreleased = filter_cols[1].checkbox("只看未发售 / TBA", key="steam_browser_filter_unreleased", help="仅显示即将推出、未发售或日期待定项目。")
+    only_self = filter_cols[2].checkbox("只看自发行", key="steam_browser_filter_self", help="仅显示开发商与发行商相同的项目。")
+    only_chinese = filter_cols[3].checkbox("只看支持中文", key="steam_browser_filter_chinese", help="简体中文或繁体中文任一支持即保留。")
+    exclude_non_game = state_filter_cols[0].checkbox("排除非游戏内容", key="steam_browser_filter_non_game", help="过滤明确识别的 Demo、DLC、工具、原声、艺术集和软件。")
+    hide_processed = state_filter_cols[1].checkbox("隐藏已处理项目", key="steam_browser_filter_processed", help="复用候选池和操作日志判断已处理 AppID。")
+    only_unprocessed = state_filter_cols[2].checkbox("只看未处理项目", key="steam_browser_filter_unprocessed", help="聚焦未进入候选池且没有操作记录的项目。")
+    processed_appids = steam_search_processed_appids()
+    filtered = filter_search_imports(
+        data,
+        demo_only=only_trial,
+        unreleased_only=only_unreleased,
+        self_published_only=only_self,
+        chinese_only=only_chinese,
+        exclude_non_game=exclude_non_game,
+        processed_appids=processed_appids,
+        unprocessed_only=hide_processed or only_unprocessed,
+    )
 
-    select_cols = st.columns(6)
+    if filtered.empty:
+        stat_cols = st.columns(3)
+        stat_cols[0].metric("本次采集", len(data))
+        stat_cols[1].metric("当前筛选", 0)
+        stat_cols[2].metric("已选择", len(selected_appids))
+        st.info("暂无符合当前筛选的采集记录。请调整筛选，或先打开 Steam 浏览器并抓取页面列表。")
+        render_import_send_result_panel("steam_browser")
+        render_steam_browser_dangerous_actions()
+        return
+
+    st.markdown("#### 批量选择")
+    select_cols = st.columns(5)
     selection_actions = [
         ("全选当前筛选结果", "select_visible"),
-        ("全选有 Demo", "select_demo"),
-        ("全选有 Demo + 自发行", "select_demo_self"),
-        ("全选未上线 + 有 Demo", "select_unreleased_demo"),
-        ("清空当前选择", "clear_visible"),
+        ("全选有试玩 + 自发行", "select_demo_self"),
+        ("全选未上线 + 有试玩", "select_unreleased_demo"),
         ("反选当前筛选结果", "invert_visible"),
+        ("清空当前选择", "clear_all"),
     ]
     for index, (label, mode) in enumerate(selection_actions):
         if select_cols[index].button(label, key=f"steam_browser_bulk_select_{mode}", use_container_width=True):
-            selected_appids = update_selection_state_for_mode(selected_key, filtered, mode)
-    selected_rows_for_send = import_rows_selected_by_appids(filtered, selected_appids)
+            if mode == "clear_all":
+                set_selected_appids_state(selected_key, set())
+            else:
+                update_selection_state_for_mode(selected_key, filtered, mode, replace_matches=True)
+            st.session_state["steam_browser_selection_revision"] = int(st.session_state.get("steam_browser_selection_revision", 0)) + 1
+            st.rerun()
 
     filtered_with_selection = apply_selected_state_to_data(filtered, selected_appids)
-    display = collected_display_data_v074(filtered_with_selection)
-    display = display.drop(columns=[column for column in ["评测", "评论数"] if column in display.columns])
+    display = steam_browser_display_data(filtered_with_selection)
+    column_config = {
+        "选择": st.column_config.CheckboxColumn("选择"),
+        "头图": st.column_config.ImageColumn("头图", width="small"),
+        "Steam": st.column_config.LinkColumn("Steam", display_text="打开 Steam"),
+        "项目画像": st.column_config.LinkColumn("项目画像", display_text="打开画像"),
+    }
     reset_token = int(st.session_state.get("steam_browser_display_reset", 0))
     display_limit_key = next_display_limit_key("steam_browser", reset_token)
     display_limit = int(st.session_state.get(display_limit_key, 100))
     visible_display = display.head(display_limit)
-    st.dataframe(
+    editor_revision = int(st.session_state.get("steam_browser_selection_revision", 0))
+    visible_signature = abs(hash(tuple(visible_display["AppID"].astype(str).tolist())))
+    edited_display = st.data_editor(
         visible_display,
+        key=f"steam_browser_editor_{reset_token}_{editor_revision}_{visible_signature}_{display_limit}",
         use_container_width=True,
         hide_index=True,
-        column_config={
-            "Steam 链接": st.column_config.LinkColumn("Steam 链接", display_text="打开 Steam"),
-        },
+        column_config=column_config,
+        disabled=[column for column in visible_display.columns if column != "选择"],
     )
+    visible_appids = set(visible_display["AppID"].astype(str).str.strip())
+    editor_selected = set(edited_display.loc[edited_display["选择"].astype(bool), "AppID"].astype(str).str.strip())
+    selected_appids = (set(selected_appids) - visible_appids) | editor_selected
+    set_selected_appids_state(selected_key, selected_appids)
     if len(display) > display_limit:
         if st.button("显示更多 100 条", key="steam_browser_show_more", use_container_width=True):
             st.session_state[display_limit_key] = display_limit + 100
             st.rerun()
-    render_import_action_bar("steam_browser", selected_rows_for_send, import_steam_browser_rows_to_candidate_pool, selected_key, filtered, position="bottom")
+
+    stat_cols = st.columns(3)
+    stat_cols[0].metric("本次采集", len(data))
+    stat_cols[1].metric("当前筛选", len(filtered))
+    stat_cols[2].metric("已选择", len(selected_appids))
+
+    selected_rows_for_send = import_rows_selected_by_appids(data, selected_appids)
+    render_import_action_bar("steam_browser", selected_rows_for_send, import_steam_browser_rows_to_candidate_pool, selected_key, filtered, position="table")
     render_selected_import_preview("steam_browser", selected_rows_for_send)
-    render_import_snapshot("steam_browser", selected_rows_for_send, import_steam_browser_rows_to_candidate_pool)
+    render_import_snapshot("steam_browser", selected_rows_for_send, import_steam_browser_rows_to_candidate_pool, fallback_rows=filtered)
     render_import_send_result_panel("steam_browser")
+    render_steam_browser_dangerous_actions()
     if SHOW_DEBUG_INFO:
         with st.expander("查看完整采集表 / 调试数据", expanded=False):
-            st.dataframe(display, use_container_width=True, hide_index=True)
-    st.caption(f"当前筛选 {len(filtered)} 条，已选择 {len(selected_appids & appids_from_frame(filtered))} 条。数据文件：{STEAM_BROWSER_COLLECTED_CSV_PATH}")
+            st.dataframe(display, use_container_width=True, hide_index=True, column_config=column_config)
 
 
 def import_steam_browser_rows_to_candidate_pool(rows: list[dict], batch_id: str = "") -> dict:
@@ -11415,40 +11660,134 @@ def import_steam_browser_rows_to_candidate_pool(rows: list[dict], batch_id: str 
     return stats
 
 
+def steam_search_processed_appids() -> set[str]:
+    processed: set[str] = set()
+    try:
+        logs = load_action_log(ACTION_LOG_CSV_PATH)
+        if not logs.empty and "appid" in logs.columns:
+            processed |= {value for value in logs["appid"].astype(str).str.strip().tolist() if value}
+    except Exception:
+        pass
+    try:
+        pool = load_candidate_pool(CANDIDATE_POOL_CSV_PATH)
+        if not pool.empty and "appid" in pool.columns:
+            processed |= {value for value in pool["appid"].astype(str).str.strip().tolist() if value}
+    except Exception:
+        pass
+    return processed
+
+
 def render_steam_search_import_page() -> None:
     st.subheader("Steam 搜索导入")
-    st.caption("用于从 Steam 搜索结果批量导入 AppID，例如 Coming Soon、Demo、热门即将推出等。默认限制数量，避免一次拉取过多噪音数据。")
-    st.info("建议每次 20-100 条，避免触发 Steam 访问限制。")
-
-    source_options = ["Coming Soon 游戏", "Demo 池", "自定义 Steam 搜索 URL"]
-    config_cols = st.columns([1.2, 2.2, 1, 1])
-    source_label = config_cols[0].selectbox("导入来源", source_options, key="steam_search_import_source")
-    custom_url = ""
-    if source_label == "自定义 Steam 搜索 URL":
-        custom_url = config_cols[1].text_input(
-            "Steam 搜索 URL",
-            key="steam_search_import_custom_url",
-            placeholder="https://store.steampowered.com/search/?filter=comingsoon",
-        )
-    else:
-        config_cols[1].caption("使用 Steam 官方搜索分页接口，不依赖页面“显示更多”。")
-    max_apps = config_cols[2].selectbox(
-        "最大导入数量",
-        [20, 50, 100, 200, 500],
-        index=1,
-        format_func=lambda value: "500（高风险，不推荐）" if int(value) == 500 else str(value),
-        key="steam_search_import_max",
+    st.info("操作流程：① 选择来源和排序　② 抓取游戏　③ 补全基础信息　④ 筛选 / 勾选　⑤ 发送候选池或进入项目画像")
+    st.info(
+        "**这个模块只导入 Steam 搜索结果页**\n\n"
+        "可抓：`/search/` 关键词、热门新品、Coming Soon、标签搜索。　"
+        "不可抓：新品节活动页、Explore/New、单个 App、开发商页。\n\n"
+        "不可抓时不会自动改抓默认页；活动页请用“Steam 页面采集”，单个游戏请用“查查 / 项目画像”。"
     )
-    batch_count = config_cols[3].selectbox("每批数量", [20, 50, 100], index=1, key="steam_search_import_count")
-    sleep_seconds = config_cols[3].selectbox("请求间隔", [2, 3, 5], index=0, key="steam_search_import_sleep")
-    if int(max_apps) == 500:
-        st.warning("500 条可能触发 Steam 访问限制，不建议连续使用。建议优先使用 50 或 100。")
-    elif int(max_apps) == 200:
-        st.info("200 条适合单次较大筛选，建议间隔使用。")
 
+    st.markdown("#### A. Steam 源端筛选")
+    st.caption("可抓：Steam 搜索结果页。不可抓：新品节、Explore/New、单个 App 页；不支持时不会 fallback。")
+    steam_filter_cols = st.columns([3, 1])
+    steam_filter_cols[0].caption(
+        "复杂筛选请先在 Steam 搜索页完成，例如语言、价格、标签、类型、玩家人数、功能等；筛选后复制 `/search/` URL 回到这里导入。工具内只保留发行工作流常用筛选。"
+    )
+    steam_filter_cols[1].link_button(
+        "去 Steam 筛选后复制搜索 URL",
+        "https://store.steampowered.com/search/",
+        use_container_width=True,
+    )
+    source_options = ["Coming Soon 游戏", "Demo 池", "自定义 Steam 搜索 URL"]
+    source_preview_urls = {
+        "Coming Soon 游戏": "https://store.steampowered.com/search/?filter=comingsoon&category1=998",
+        "Demo 池": "https://store.steampowered.com/search/?category1=10",
+    }
+    source_descriptions = {
+        "Coming Soon 游戏": "从 Steam 官方即将推出搜索结果中批量导入游戏。",
+        "Demo 池": "从 Steam 可试玩 / Demo 相关结果中导入，适合找新品节和试玩项目。",
+        "自定义 Steam 搜索 URL": "粘贴 Steam /search/ 关键词、热门新品或标签搜索结果页 URL。",
+    }
+    source_cols = st.columns([1.2, 2.4, 1.2])
+    source_label = source_cols[0].selectbox("导入来源", source_options, key="steam_search_import_source")
+    custom_url = ""
+    custom_url_valid = True
+    custom_url_message = ""
+    if source_label == "自定义 Steam 搜索 URL":
+        custom_url = source_cols[1].text_input(
+            "Steam 搜索 URL",
+            value="https://store.steampowered.com/search?term=",
+            key="steam_search_import_custom_url",
+        )
+        custom_url_valid, custom_url_message = validate_steam_search_url(custom_url)
+        if custom_url_valid:
+            source_cols[2].link_button("打开 Steam 搜索页", custom_url, use_container_width=True)
+        else:
+            source_cols[2].caption("当前链接不可抓")
+    else:
+        source_cols[1].caption(source_descriptions[source_label])
+        source_cols[2].link_button("预浏览 Steam 页面", source_preview_urls[source_label], use_container_width=True)
+    if source_label == "自定义 Steam 搜索 URL":
+        st.caption(source_descriptions[source_label])
+        if custom_url_valid:
+            st.success("已识别为 Steam 搜索结果页。")
+        else:
+            st.error(f"{custom_url_message} 请改用 Steam 页面采集，或换成 `/search/` 搜索结果页。")
+        st.caption("支持示例：Steam 热门新品搜索页、Coming Soon 搜索页、关键词搜索页。")
+
+    source_signature = f"{source_label}|{custom_url.strip()}"
+    if st.session_state.get("steam_search_offset_source") != source_signature:
+        st.session_state["steam_search_offset_source"] = source_signature
+        st.session_state["steam_search_offset"] = 0
+        st.session_state["steam_search_offset_revision"] = int(st.session_state.get("steam_search_offset_revision", 0)) + 1
+
+    sort_label = st.selectbox(
+        "排序依据",
+        ["相关性", "发行日期", "名称", "价格低到高", "价格高到低", "用户评测"],
+        key="steam_search_sort_rule",
+    )
+    with st.expander("高级设置", expanded=False):
+        advanced_cols = st.columns(4)
+        batch_count = advanced_cols[0].selectbox("每批数量", [20, 50, 100], index=1, key="steam_search_import_count")
+        sleep_seconds = advanced_cols[1].selectbox("请求间隔", [2, 3, 5], index=0, key="steam_search_import_sleep")
+        offset_revision = int(st.session_state.get("steam_search_offset_revision", 0))
+        offset = int(
+            advanced_cols[2].number_input(
+                "下一批起点",
+                min_value=0,
+                step=50,
+                value=int(st.session_state.get("steam_search_offset", 0)),
+                key=f"steam_search_offset_input_{offset_revision}",
+            )
+        )
+        max_apps = advanced_cols[3].selectbox(
+            "最大抓取数量",
+            [20, 50, 100, 200, 500],
+            index=1,
+            format_func=lambda value: "500（高风险）" if int(value) == 500 else str(value),
+            key="steam_search_import_max",
+        )
+        if int(max_apps) >= 200:
+            st.warning("较大抓取数量可能触发 Steam 访问限制，建议保持 50。")
+    st.session_state["steam_search_offset"] = offset
+    sort_value = {
+        "相关性": "",
+        "发行日期": "Released_DESC",
+        "名称": "Name_ASC",
+        "价格低到高": "Price_ASC",
+        "价格高到低": "Price_DESC",
+        "用户评测": "Reviews_DESC",
+    }[sort_label]
     st.markdown("#### 主操作")
-    action_cols = st.columns(3)
-    if action_cols[0].button("抓取 AppID", key="steam_search_import_fetch", use_container_width=True):
+    st.caption(
+        f"当前批次：{offset + 1}-{offset + int(max_apps)}　·　"
+        f"下一批：{offset + int(max_apps) + 1}-{offset + int(max_apps) * 2}　·　"
+        "看完当前批次后，点击“抓取下一批”继续看后续结果。"
+    )
+    action_cols = st.columns([1, 1, 1, 2])
+    fetch_current = action_cols[0].button("抓取游戏", key="steam_search_import_fetch", use_container_width=True)
+    fetch_next = action_cols[1].button("抓取下一批", key="steam_search_import_fetch_next", use_container_width=True)
+    if fetch_current or fetch_next:
         filter_name = ""
         category1 = None
         if source_label == "Coming Soon 游戏":
@@ -11456,39 +11795,49 @@ def render_steam_search_import_page() -> None:
             category1 = "998"
         elif source_label == "Demo 池":
             category1 = "10"
-        if source_label == "自定义 Steam 搜索 URL" and not custom_url.strip():
-            st.warning("请先粘贴 Steam 搜索页 URL。")
+        if source_label == "自定义 Steam 搜索 URL" and not custom_url_valid:
+            st.error(f"{custom_url_message} 当前结果保持不变；活动页请用 Steam 页面采集，单个 App 请用查查 / 项目画像。")
         else:
+            fetch_offset = offset + int(max_apps) if fetch_next else offset
             effective_max_apps = int(max_apps)
             effective_count = min(int(batch_count), effective_max_apps)
-            result = fetch_steam_search_appids_with_stats(
-                filter_name=filter_name,
-                category1=category1,
-                search_url=custom_url,
-                import_source=source_label,
-                count=effective_count,
-                max_apps=effective_max_apps,
-                sleep_seconds=float(sleep_seconds),
-            )
-            records = result["rows"][:effective_max_apps]
-            clear_search_imports(STEAM_SEARCH_IMPORT_CSV_PATH)
-            set_selected_appids_state("steam_search_selected_appids", set())
-            stats = save_search_import_rows(STEAM_SEARCH_IMPORT_CSV_PATH, records)
-            if result["errors"]:
-                st.warning("部分批次抓取失败，已保留成功结果。接口结构变化时可改用 Steam 页面采集或手动 AppID 导入。")
-                st.caption("；".join(result["errors"][:3]))
-            st.success(f"抓取完成：本次 {len(records)} 条，新增 {stats['created']} 条，更新 {stats['updated']} 条。")
+            try:
+                result = fetch_steam_search_appids_with_stats(
+                    filter_name=filter_name,
+                    category1=category1,
+                    search_url=custom_url,
+                    sort_by=sort_value,
+                    offset=fetch_offset,
+                    import_source=source_label,
+                    count=effective_count,
+                    max_apps=effective_max_apps,
+                    sleep_seconds=float(sleep_seconds),
+                )
+            except ValueError as exc:
+                st.error(f"{exc} 当前结果保持不变。")
+            else:
+                records = result["rows"][:effective_max_apps]
+                clear_search_imports(STEAM_SEARCH_IMPORT_CSV_PATH)
+                set_selected_appids_state("steam_search_selected_appids", set())
+                stats = save_search_import_rows(STEAM_SEARCH_IMPORT_CSV_PATH, records)
+                st.session_state["steam_search_last_fetch_count"] = len(records)
+                if fetch_next:
+                    offset = fetch_offset
+                    st.session_state["steam_search_offset"] = offset
+                    st.session_state["steam_search_offset_revision"] = offset_revision + 1
+                if result["errors"]:
+                    st.warning("部分批次抓取失败，已保留成功结果。接口结构变化时可改用 Steam 页面采集或手动 AppID 导入。")
+                    st.caption("；".join(result["errors"][:3]))
+                st.success(f"抓取完成：本次 {len(records)} 条，新增 {stats['created']} 条，更新 {stats['updated']} 条。")
 
-    if action_cols[1].button("补全基础信息", key="steam_search_import_enrich", use_container_width=True):
+    if action_cols[2].button("补全基础信息", key="steam_search_import_enrich", use_container_width=True):
         try:
             stats = enrich_search_imports_basic_info(STEAM_SEARCH_IMPORT_CSV_PATH)
         except Exception as exc:
             st.error(f"Steam 基础信息补全失败：{exc}")
         else:
             st.success(f"补全完成：请求 {stats['requested']} 个，成功 {stats['updated']} 个，失败 {stats['failed']} 个，缓存命中 {stats['cache_hit']} 个。")
-
-    st.markdown("#### 数据管理")
-    data_manage_cols = st.columns([1, 1, 1, 2])
+    action_cols[3].caption("补全开发、发行、内容类型、试玩、中文、发售、价格等字段；评测仅对当前快照轻量兜底。")
 
     data = apply_search_import_suggestions(load_search_imports(STEAM_SEARCH_IMPORT_CSV_PATH)).copy()
     selected_key = "steam_search_selected_appids"
@@ -11496,112 +11845,128 @@ def render_steam_search_import_page() -> None:
     selected_appids = selected_appids & appids_from_frame(data)
     set_selected_appids_state(selected_key, selected_appids)
 
-    filter_cols = st.columns(6)
-    filtered = filter_search_imports(
-        data,
-        demo_only=filter_cols[0].checkbox("只看有 Demo", key="steam_search_filter_demo"),
-        unreleased_only=filter_cols[1].checkbox("只看未发售 / TBA", key="steam_search_filter_unreleased"),
-        self_published_only=filter_cols[2].checkbox("只看自发行", key="steam_search_filter_self"),
-        schinese_only=filter_cols[3].checkbox("只看支持简中", key="steam_search_filter_schinese"),
-        observation_only=filter_cols[4].checkbox("只看候选池观察 / 待试玩", key="steam_search_filter_observation"),
-        exclude_reference=filter_cols[5].checkbox("排除竞品参考", key="steam_search_filter_reference"),
-    )
-
-    selection_actions = [
-        ("全选当前筛选结果", "select_visible"),
-        ("清空当前选择", "clear_visible"),
-    ]
-    for index, (label, mode) in enumerate(selection_actions):
-        if data_manage_cols[index].button(label, key=f"steam_search_manage_select_{mode}", use_container_width=True):
-            selected_appids = update_selection_state_for_mode(selected_key, filtered, mode)
-
-    if data_manage_cols[2].button("按 AppID 去重", key="steam_search_import_dedupe", use_container_width=True):
+    st.markdown("#### 数据管理")
+    data_manage_cols = st.columns([1, 2])
+    if data_manage_cols[0].button("去除重复游戏", key="steam_search_import_dedupe", use_container_width=True):
         stats = dedupe_search_imports_by_appid(STEAM_SEARCH_IMPORT_CSV_PATH)
         data_after_dedupe = load_search_imports(STEAM_SEARCH_IMPORT_CSV_PATH)
-        selected_appids = set(st.session_state.get(selected_key) or set()) & appids_from_frame(data_after_dedupe)
-        set_selected_appids_state(selected_key, selected_appids)
-        st.success(
-            f"去重完成：before {stats['before']}，after {stats['after']}，removed {stats['removed']}。"
-            f"备份：{stats.get('backup_path', '')}"
-        )
-
-    data_manage_cols[3].caption("清空本次导入：只清当前导入列表，不清候选池。")
-    confirm_clear = data_manage_cols[3].checkbox("我确认清空本次导入", key="steam_search_import_confirm_clear")
-    if data_manage_cols[3].button("清空本次导入", key="steam_search_import_clear", use_container_width=True):
+        set_selected_appids_state(selected_key, set(st.session_state.get(selected_key) or set()) & appids_from_frame(data_after_dedupe))
+        st.toast(f"去重完成：保留 {stats['after']} 条，移除 {stats['removed']} 条。")
+        st.rerun()
+    data_manage_cols[1].caption("危险操作：只清空本次导入列表，不影响候选池。")
+    confirm_clear = data_manage_cols[1].checkbox("我确认清空本次导入", key="steam_search_import_confirm_clear")
+    if data_manage_cols[1].button("清空本次导入", key="steam_search_import_clear", use_container_width=True):
         if not confirm_clear:
             st.warning("清空前请先勾选确认。此操作只清空当前导入表，不影响候选池。")
         else:
             stats = clear_search_imports(STEAM_SEARCH_IMPORT_CSV_PATH)
             set_selected_appids_state(selected_key, set())
             st.session_state["steam_search_display_reset"] = int(st.session_state.get("steam_search_display_reset", 0)) + 1
-            st.success(f"已清空本次导入：移除 {stats['removed']} 条。备份：{stats.get('backup_path', '')}")
-            data = apply_search_import_suggestions(load_search_imports(STEAM_SEARCH_IMPORT_CSV_PATH)).copy()
-            filtered = filter_search_imports(data)
-            selected_appids = set()
+            st.session_state["steam_search_last_fetch_count"] = 0
+            st.session_state["steam_search_offset"] = 0
+            st.session_state["steam_search_offset_revision"] = int(st.session_state.get("steam_search_offset_revision", 0)) + 1
+            st.toast(f"已清空本次导入：移除 {stats['removed']} 条。")
+            st.rerun()
 
-    selected_total = len(selected_appids)
-    stat_cols = st.columns(5)
-    stat_cols[0].metric("本次抓取数量", len(data))
-    stat_cols[1].metric("去重后数量", data["appid"].nunique() if not data.empty else 0)
-    stat_cols[2].metric("当前筛选数量", len(filtered))
-    stat_cols[3].metric("已选择数量", selected_total)
-    stat_cols[4].caption(f"数据文件：{STEAM_SEARCH_IMPORT_CSV_PATH}")
+    st.markdown("#### B. 本地结果筛选")
+    st.caption("以下筛选只作用于已抓取结果，不会新增 Steam 请求。")
+    filter_cols = st.columns(4)
+    state_filter_cols = st.columns(3)
+    only_trial = filter_cols[0].checkbox("只看有试玩", key="steam_search_filter_demo", help="包含有 Demo 的游戏和 Demo App。")
+    only_unreleased = filter_cols[1].checkbox("只看未发售 / TBA", key="steam_search_filter_unreleased", help="仅显示未发售、即将推出或日期待定项目。")
+    only_self = filter_cols[2].checkbox("只看自发行", key="steam_search_filter_self", help="仅显示开发商与发行商相同或符合自发行判断的项目。")
+    only_chinese = filter_cols[3].checkbox("只看支持中文", key="steam_search_filter_chinese", help="简体中文或繁体中文任一支持即保留。")
+    exclude_non_game = state_filter_cols[0].checkbox("排除非游戏内容", key="steam_search_filter_non_game", help="只过滤明确识别的 DLC、Demo、Tool、OST、Artbook 和 Software。")
+    hide_processed = state_filter_cols[1].checkbox("隐藏已处理项目", key="steam_search_filter_processed", help="复用候选池和操作日志判断。")
+    only_unprocessed = state_filter_cols[2].checkbox("只看未处理项目", key="steam_search_filter_unprocessed", help="与隐藏已处理同源，明确聚焦未处理 AppID。")
+    processed_appids = steam_search_processed_appids()
+    current_appids = appids_from_frame(data)
+    processed_count = len(current_appids & processed_appids)
+    batch_status_cols = st.columns(4)
+    batch_status_cols[0].metric("当前批次", f"{offset + 1}-{offset + int(max_apps)}")
+    batch_status_cols[1].metric("下一批", f"{offset + int(max_apps) + 1}-{offset + int(max_apps) * 2}")
+    batch_status_cols[2].metric("已处理", processed_count)
+    batch_status_cols[3].metric("未处理", max(0, len(current_appids) - processed_count))
+    filtered = filter_search_imports(
+        data,
+        demo_only=only_trial,
+        unreleased_only=only_unreleased,
+        self_published_only=only_self,
+        chinese_only=only_chinese,
+        exclude_non_game=exclude_non_game,
+        processed_appids=processed_appids,
+        unprocessed_only=hide_processed or only_unprocessed,
+    )
 
     if filtered.empty:
-        st.info("暂无 Steam 搜索导入记录。请先选择来源并抓取 AppID。")
+        stat_cols = st.columns(4)
+        stat_cols[0].metric("本次抓取", int(st.session_state.get("steam_search_last_fetch_count", len(data))))
+        stat_cols[1].metric("去重后", data["appid"].nunique() if not data.empty else 0)
+        stat_cols[2].metric("当前筛选", 0)
+        stat_cols[3].metric("已选择", len(selected_appids))
+        st.info("暂无 Steam 搜索导入记录。请先选择来源并抓取游戏。")
+        render_import_send_result_panel("steam_search")
         return
 
-    selected_rows_for_send = import_rows_selected_by_appids(filtered, selected_appids)
-    render_import_selection_status(len(filtered), len(selected_appids & appids_from_frame(filtered)))
-    render_import_action_bar("steam_search", selected_rows_for_send, import_steam_search_rows_to_candidate_pool, selected_key, filtered, position="top")
-
-    select_cols = st.columns(6)
+    st.markdown("#### 批量选择")
+    select_cols = st.columns(4)
     extra_selection_actions = [
         ("全选当前筛选结果", "select_visible"),
-        ("全选有 Demo", "select_demo"),
-        ("全选有 Demo + 自发行", "select_demo_self"),
-        ("全选未上线 + 有 Demo", "select_unreleased_demo"),
-        ("清空当前选择", "clear_visible"),
+        ("全选有试玩 + 自发行", "select_demo_self"),
+        ("全选未上线 + 有试玩", "select_unreleased_demo"),
         ("反选当前筛选结果", "invert_visible"),
     ]
     for index, (label, mode) in enumerate(extra_selection_actions):
         if select_cols[index].button(label, key=f"steam_search_bulk_select_{mode}", use_container_width=True):
-            selected_appids = update_selection_state_for_mode(selected_key, filtered, mode)
-    selected_rows_for_send = import_rows_selected_by_appids(filtered, selected_appids)
+            update_selection_state_for_mode(selected_key, filtered, mode)
+            st.session_state["steam_search_selection_revision"] = int(st.session_state.get("steam_search_selection_revision", 0)) + 1
+            st.rerun()
 
-    show_source_url = st.checkbox("显示来源页面列", value=False, key="steam_search_show_source_url")
     filtered_with_selection = apply_selected_state_to_data(filtered, selected_appids)
     display = search_import_display_data(filtered_with_selection)
-    display = display.drop(columns=[column for column in ["评测", "评论数"] if column in display.columns])
-    if not show_source_url and "来源页面" in display.columns:
-        display = display.drop(columns=["来源页面"])
     column_config = {
-        "Steam 链接": st.column_config.LinkColumn("Steam 链接", display_text="打开 Steam"),
+        "选择": st.column_config.CheckboxColumn("选择"),
+        "头图": st.column_config.ImageColumn("头图", width="small"),
+        "Steam": st.column_config.LinkColumn("Steam", display_text="打开 Steam"),
+        "项目画像": st.column_config.LinkColumn("项目画像", display_text="打开画像"),
     }
-    if "来源页面" in display.columns:
-        column_config["来源页面"] = st.column_config.LinkColumn("来源页面", display_text="来源页面")
     reset_token = int(st.session_state.get("steam_search_display_reset", 0))
     display_limit_key = next_display_limit_key("steam_search", reset_token)
     display_limit = int(st.session_state.get(display_limit_key, 100))
     visible_display = display.head(display_limit)
-    st.dataframe(
+    editor_revision = int(st.session_state.get("steam_search_selection_revision", 0))
+    visible_signature = abs(hash(tuple(visible_display["AppID"].astype(str).tolist())))
+    edited_display = st.data_editor(
         visible_display,
+        key=f"steam_search_editor_{reset_token}_{editor_revision}_{visible_signature}_{display_limit}",
         use_container_width=True,
         hide_index=True,
         column_config=column_config,
+        disabled=[column for column in visible_display.columns if column != "选择"],
     )
+    visible_appids = set(visible_display["AppID"].astype(str).str.strip())
+    editor_selected = set(edited_display.loc[edited_display["选择"].astype(bool), "AppID"].astype(str).str.strip())
+    selected_appids = (set(selected_appids) - visible_appids) | editor_selected
+    set_selected_appids_state(selected_key, selected_appids)
     if len(display) > display_limit:
         if st.button("显示更多 100 条", key="steam_search_show_more", use_container_width=True):
             st.session_state[display_limit_key] = display_limit + 100
             st.rerun()
-    render_import_action_bar("steam_search", selected_rows_for_send, import_steam_search_rows_to_candidate_pool, selected_key, filtered, position="bottom")
+
+    stat_cols = st.columns(4)
+    stat_cols[0].metric("本次抓取", int(st.session_state.get("steam_search_last_fetch_count", len(data))))
+    stat_cols[1].metric("去重后", data["appid"].nunique() if not data.empty else 0)
+    stat_cols[2].metric("当前筛选", len(filtered))
+    stat_cols[3].metric("已选择", len(selected_appids))
+
+    selected_rows_for_send = import_rows_selected_by_appids(data, selected_appids)
+    render_import_action_bar("steam_search", selected_rows_for_send, import_steam_search_rows_to_candidate_pool, selected_key, filtered, position="table")
     render_selected_import_preview("steam_search", selected_rows_for_send)
-    render_import_snapshot("steam_search", selected_rows_for_send, import_steam_search_rows_to_candidate_pool)
+    render_import_snapshot("steam_search", selected_rows_for_send, import_steam_search_rows_to_candidate_pool, fallback_rows=filtered)
     render_import_send_result_panel("steam_search")
     if SHOW_DEBUG_INFO:
         with st.expander("查看完整导入表 / 调试数据", expanded=False):
             st.dataframe(display, use_container_width=True, hide_index=True, column_config=column_config)
-    st.caption(f"当前筛选 {len(filtered)} 条，已选择 {len(selected_appids & appids_from_frame(filtered))} 条。")
 
 
 def import_steam_search_rows_to_candidate_pool(rows: list[dict], batch_id: str = "") -> dict:
@@ -12098,6 +12463,38 @@ def request_nav(page_name: str, **kwargs) -> None:
     st.rerun()
 
 
+def handle_import_table_action_query() -> None:
+    action = str(st.query_params.get("import_action", "") or "").strip()
+    if action not in {"chacha", "profile"}:
+        return
+    appid = str(st.query_params.get("appid", "") or "").strip()
+    game_name = str(st.query_params.get("game_name", "") or "").strip()
+    steam_url = str(st.query_params.get("steam_url", "") or "").strip() or steam_url_from_appid(appid)
+    st.query_params.clear()
+    if action == "chacha":
+        st.session_state["pending_lookup_prefill"] = {
+            "lookup_input": steam_url or appid or game_name,
+            "source": "Steam 搜索导入表格",
+        }
+        st.session_state["selected_page"] = "查查"
+        return
+    row = {"appid": appid, "game_name": game_name, "steam_url": steam_url}
+    set_profile_prefill_from_mapping(row, source_context="Steam 搜索导入表格")
+    append_action_log(
+        ACTION_LOG_CSV_PATH,
+        action="发送项目画像",
+        appid=appid,
+        game_name=game_name,
+        detail="来自 Steam 搜索导入表格",
+        target_page="一键项目画像",
+        source_page="Steam 搜索导入",
+    )
+    st.session_state["profile_focus_appid"] = appid
+    st.session_state["profile_focus_name"] = game_name
+    st.session_state["profile_focus_steam_url"] = steam_url
+    st.session_state["selected_page"] = "一键项目画像"
+
+
 def main() -> None:
     """启动 Streamlit 主页面。"""
     ensure_csv_exists(CSV_PATH)
@@ -12115,6 +12512,7 @@ def main() -> None:
     HOME_SNAPSHOT_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 
     st.set_page_config(page_title="Steam 项目初筛助手", layout="wide")
+    handle_import_table_action_query()
 
     st.sidebar.title("Steam 项目初筛助手")
     st.sidebar.info("当前版本：V0.8.0 作品集展示收口版")

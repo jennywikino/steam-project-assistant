@@ -34,13 +34,19 @@ STEAM_BROWSER_COLLECTED_COLUMNS = [
     "has_demo",
     "supports_schinese",
     "genres_tags",
+    "content_type",
+    "app_type",
+    "supports_tchinese",
+    "supported_languages",
+    "header_image",
+    "price",
     "review_score",
     "review_count",
     "import_suggestion",
     "import_reason",
 ]
 
-APP_URL_RE = re.compile(r"https?://store\.steampowered\.com/app/(\d+)(?:/|$)", re.IGNORECASE)
+APP_URL_RE = re.compile(r"https?://store\.steampowered\.com/app/(\d+)(?:[/?#]|$)", re.IGNORECASE)
 
 
 def playwright_available() -> bool:
@@ -153,7 +159,10 @@ def collect_current_page_appids(csv_path: Path | None = None, debug_port: int = 
     if not appids:
         return {
             "success": False,
-            "message": "当前页面未发现 Steam app 链接，请滚动或打开具体游戏页后再试。",
+            "message": (
+                "当前页面未识别到可导入的 Steam 游戏列表。请切换到搜索结果页、榜单页、标签页或分类页；"
+                "新品节请进入榜单、类型、主题或功能列表后再抓取；单个游戏请复制 Steam URL 或游戏名到项目画像。"
+            ),
             "rows": [],
         }
     rows = build_collected_rows(appids, page_info["url"], page_info["title"], "current_page")
@@ -172,14 +181,25 @@ def collect_current_app(csv_path: Path | None = None, debug_port: int = DEFAULT_
     except Exception as exc:
         return {"success": False, "message": _format_cdp_error(exc), "rows": []}
 
-    appids = extract_appids_from_links([page_info["url"]])
-    if not appids:
-        return {"success": False, "message": "当前页不是 Steam App 页面。", "rows": []}
-    rows = build_collected_rows([appids[0]], page_info["url"], page_info["title"], "current_app")
+    url_appids = extract_appids_from_links([page_info["url"]])
+    if url_appids:
+        appid = url_appids[0]
+        collect_method = "current_app_url"
+    else:
+        linked_appids = extract_appids_from_links(page_info.get("links", []))
+        if not linked_appids:
+            return {
+                "success": False,
+                "message": "当前页面不是单个 Steam App 页面，也未识别到可导入的游戏链接。请打开具体游戏页后再试。",
+                "rows": [],
+            }
+        appid = linked_appids[0]
+        collect_method = "current_app_dom"
+    rows = build_collected_rows([appid], page_info["url"], page_info["title"], collect_method)
     stats = save_collected_rows(csv_path, rows) if csv_path else {}
     return {
         "success": True,
-        "message": f"已提取当前游戏 AppID：{appids[0]}。",
+        "message": f"已提取当前游戏 AppID：{appid}。",
         "rows": rows,
         "save_stats": stats,
     }
@@ -217,6 +237,12 @@ def build_collected_rows(appids: list[str], source_page_url: str, source_page_ti
                 "has_demo": "",
                 "supports_schinese": "",
                 "genres_tags": "",
+                "content_type": "",
+                "app_type": "",
+                "supports_tchinese": "",
+                "supported_languages": "",
+                "header_image": "",
+                "price": "",
                 "review_score": "",
                 "review_count": "",
                 "import_suggestion": "待补资料",
@@ -250,7 +276,7 @@ def save_collected_rows(csv_path: Path, rows: list[dict]) -> dict:
         mask = data["appid"].astype(str).str.strip().eq(appid)
         if mask.any():
             index = data.loc[mask].index[0]
-            for column in ["collected_at", "source_page_url", "source_page_title", "collect_method"]:
+            for column in ["source_page_url", "source_page_title", "collect_method"]:
                 data.loc[index, column] = row.get(column, "")
             for column in STEAM_BROWSER_COLLECTED_COLUMNS:
                 if column in {"appid", "collected_at", "source_page_url", "source_page_title", "collect_method"}:
@@ -389,6 +415,12 @@ def enrich_collected_basic_info(csv_path: Path, appids: list[str] | None = None)
             ("has_demo", "has_demo"),
             ("supports_schinese", "supports_schinese"),
             ("genres_tags", "genres_tags"),
+            ("content_type", "content_type"),
+            ("app_type", "app_type"),
+            ("supports_tchinese", "supports_tchinese"),
+            ("supported_languages", "supported_languages"),
+            ("header_image", "header_image"),
+            ("price", "price"),
             ("review_score", "review_score"),
             ("review_count", "review_count"),
         ]:
