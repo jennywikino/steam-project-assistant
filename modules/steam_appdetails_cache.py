@@ -197,10 +197,11 @@ def _summary_from_raw_appdetails(appid: str, raw: dict, checked_at: str, region_
 
     return {
         "appid": appid,
+        "app_type": str(details.get("type", "") or ""),
         "checked_at": checked_at,
         "success": True,
         "name": str(details.get("name", "") or ""),
-        "cache_schema": "0.6.11c",
+        "cache_schema": "0.8.5-p2",
         "detail_fetch_status": "已获取",
         "cache_status": "fetched",
         "appdetails_region_used": region_name,
@@ -230,6 +231,7 @@ def _summary_from_raw_appdetails(appid: str, raw: dict, checked_at: str, region_
         "supported_languages": supported_languages,
         "supported_languages_summary": _summarize_supported_languages(supported_languages),
         "supports_schinese": _detect_simplified_chinese(supported_languages),
+        "supports_tchinese": _detect_traditional_chinese(supported_languages),
         "header_image": str(details.get("header_image", "") or ""),
         "capsule_image": str(details.get("capsule_image", "") or ""),
         "screenshots": _normalize_screenshots(screenshots),
@@ -321,7 +323,7 @@ def _summary_from_store_html(appid: str, html: str, checked_at: str, region_name
         {
             "success": True,
             "name": name,
-            "cache_schema": "0.6.11c",
+            "cache_schema": "0.8.5-p2",
             "detail_fetch_status": "html_fallback",
             "cache_status": "fetched",
             "appdetails_region_used": "",
@@ -506,10 +508,11 @@ def _extract_app_tags(html: str) -> list[str]:
 def _empty_summary(appid: str, status: str, checked_at: str = "") -> dict:
     return {
         "appid": str(appid or ""),
+        "app_type": "",
         "checked_at": checked_at or datetime.now().isoformat(timespec="seconds"),
         "success": False,
         "name": "",
-        "cache_schema": "0.6.11c",
+        "cache_schema": "0.8.5-p2",
         "detail_fetch_status": status,
         "cache_status": "none",
         "appdetails_region_used": "",
@@ -541,6 +544,7 @@ def _empty_summary(appid: str, status: str, checked_at: str = "") -> dict:
         "supported_languages": "",
         "supported_languages_summary": "未获取",
         "supports_schinese": "未确认",
+        "supports_tchinese": "未确认",
         "header_image": "",
         "capsule_image": "",
         "screenshots": [],
@@ -620,6 +624,15 @@ def _detect_simplified_chinese(value: str) -> str:
     return "未确认"
 
 
+def _detect_traditional_chinese(value: str) -> str:
+    text = str(value or "").casefold()
+    if "繁体中文" in str(value or "") or "traditional chinese" in text:
+        return "是"
+    if str(value or "").strip():
+        return "否"
+    return "未确认"
+
+
 def _load_cache(cache_path: Path) -> dict:
     if not cache_path.exists():
         return {}
@@ -653,7 +666,7 @@ def _entry_missing_required_fields(entry: dict) -> bool:
     required_keys = ["developers", "publishers", "genres", "categories", "release_date", "header_image", "screenshots", "movies"]
     if any(key not in entry for key in required_keys):
         return True
-    if entry.get("cache_schema") != "0.6.11c":
+    if entry.get("cache_schema") != "0.8.5-p2":
         return True
     if entry.get("success") and (
         "developer" not in entry

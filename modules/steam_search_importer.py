@@ -23,7 +23,10 @@ STEAM_SEARCH_IMPORT_COLUMNS = [
     "steam_url",
     "import_source",
     "source_page_url",
+    "source_page_title",
     "collected_at",
+    "first_seen_at",
+    "store_listed_at",
     "collect_method",
     "selected",
     "developer",
@@ -37,6 +40,14 @@ STEAM_SEARCH_IMPORT_COLUMNS = [
     "header_image",
     "review_score",
     "review_count",
+    "positive_rate",
+    "review_score_desc",
+    "price",
+    "app_type",
+    "content_type",
+    "trial_status",
+    "supports_tchinese",
+    "supported_languages",
     "import_suggestion",
     "import_reason",
 ]
@@ -65,6 +76,7 @@ def fetch_steam_search_appids(
         count=count,
         max_apps=max_apps,
         sleep_seconds=sleep_seconds,
+        sort_by="",
     )
     return result["rows"]
 
@@ -74,22 +86,42 @@ def fetch_steam_search_appids_with_stats(
     filter_name: str = "",
     category1: str | None = None,
     search_url: str = "",
+    sort_by: str = "发行日期",
     import_source: str = "",
     start: int = 0,
     count: int = 50,
     max_apps: int = 50,
     sleep_seconds: float = 2.0,
     timeout: float = 15.0,
+    offset: int | None = None,
+    **kwargs,
 ) -> dict:
+    if search_url:
+        valid, message = validate_steam_search_url(search_url)
+        if not valid:
+            raise ValueError(message)
+    sort_mapping = {
+        "相关性": "",
+        "发行日期": "Released_DESC",
+        "名称": "Name_ASC",
+        "价格从低到高": "Price_ASC",
+        "价格低到高": "Price_ASC",
+        "价格从高到低": "Price_DESC",
+        "价格高到低": "Price_DESC",
+        "用户评测": "Reviews_DESC",
+    }
+    effective_sort_by = sort_mapping.get(str(sort_by or "").strip(), str(sort_by or "").strip())
     params = search_params_from_url(search_url) if search_url else {}
     if filter_name:
         params["filter"] = filter_name
     if category1:
         params["category1"] = str(category1)
+    if effective_sort_by:
+        params["sort_by"] = effective_sort_by
 
     max_apps = max(1, int(max_apps or 50))
     count = max(1, min(int(count or 50), 100, max_apps))
-    start = max(0, int(start or 0))
+    start = max(0, int(offset if offset is not None else (start or 0)))
     import_source = import_source or describe_import_source(params)
     source_page_url = build_search_page_url(params)
 
@@ -136,6 +168,8 @@ def fetch_steam_search_appids_with_stats(
         "requested": len(rows),
         "source_page_url": source_page_url,
         "import_source": import_source,
+        "sort_by": effective_sort_by,
+        "offset": start,
     }
 
 
@@ -145,6 +179,23 @@ def search_params_from_url(search_url: str) -> dict:
     for key in ["start", "count", "infinite"]:
         params.pop(key, None)
     return params
+
+
+def validate_steam_search_url(search_url: str) -> tuple[bool, str]:
+    value = str(search_url or "").strip()
+    if not value:
+        return False, "请先粘贴 Steam 搜索结果页 URL。"
+    try:
+        parsed = urllib.parse.urlparse(value)
+    except ValueError:
+        return False, "当前 URL 格式无效，请换成 Steam /search/ 搜索结果页。"
+    hostname = str(parsed.hostname or "").casefold()
+    path = urllib.parse.unquote(str(parsed.path or ""))
+    if parsed.scheme.casefold() not in {"http", "https"} or hostname != "store.steampowered.com":
+        return False, "当前 URL 不是 Steam 商店搜索结果页。"
+    if path not in {"/search", "/search/"}:
+        return False, "当前 URL 不是 Steam 搜索结果页，不能用“搜索导入”抓取。"
+    return True, ""
 
 
 def build_search_page_url(params: dict) -> str:
@@ -313,11 +364,17 @@ def enrich_search_imports_basic_info(csv_path: Path, appids: list[str] | None = 
             ("release_date", "release_date"),
             ("has_demo", "has_demo"),
             ("supports_schinese", "supports_schinese"),
+            ("supports_tchinese", "supports_tchinese"),
+            ("supported_languages", "supported_languages"),
+            ("app_type", "app_type"),
             ("genres_tags", "genres_tags"),
             ("short_desc", "short_desc"),
             ("header_image", "header_image"),
             ("review_score", "review_score"),
             ("review_count", "review_count"),
+            ("positive_rate", "positive_rate"),
+            ("review_score_desc", "review_score_desc"),
+            ("price", "price"),
         ]:
             value = _clean(info.get(source_field))
             if value:
@@ -346,18 +403,28 @@ def filter_search_imports(
     unreleased_only: bool = False,
     self_published_only: bool = False,
     schinese_only: bool = False,
+    chinese_only: bool = False,
+    exclude_non_game: bool = False,
+    processed_appids: set[str] | None = None,
+    unprocessed_only: bool = False,
     observation_only: bool = False,
     exclude_reference: bool = False,
 ) -> pd.DataFrame:
     filtered = data.copy()
     if demo_only:
-        filtered = filtered.loc[filtered["has_demo"].map(_is_yes)]
+        filtered = filtered.loc[filtered.apply(lambda row: trial_status_label(row.to_dict()) in {"有", "自身为 Demo"}, axis=1)]
     if unreleased_only:
         filtered = filtered.loc[filtered.apply(lambda row: _is_unreleased(row.to_dict()), axis=1)]
     if self_published_only:
         filtered = filtered.loc[filtered.apply(lambda row: _is_self_published(row.to_dict()), axis=1)]
-    if schinese_only:
-        filtered = filtered.loc[filtered["supports_schinese"].map(_is_yes)]
+    if schinese_only or chinese_only:
+        filtered = filtered.loc[filtered.apply(lambda row: chinese_support_status(row.to_dict()) == "有", axis=1)]
+    if exclude_non_game:
+        filtered = filtered.loc[
+            filtered.apply(lambda row: content_type_label(row.to_dict()) not in {"DLC", "Demo", "Tool", "OST", "Artbook", "Software"}, axis=1)
+        ]
+    if unprocessed_only and processed_appids:
+        filtered = filtered.loc[~filtered["appid"].astype(str).str.strip().isin(processed_appids)]
     if observation_only:
         filtered = filtered.loc[filtered["import_suggestion"].astype(str).isin({"候选池观察 / 值得联系", "待试玩"})]
     if exclude_reference:
@@ -367,28 +434,133 @@ def filter_search_imports(
 
 def search_import_display_data(data: pd.DataFrame) -> pd.DataFrame:
     rows = []
-    for _, row in data.iterrows():
+    for index, (_, row) in enumerate(data.iterrows(), start=1):
+        appid = _clean(row.get("appid"))
+        game_name = _clean(row.get("game_name")) or f"AppID {appid}"
+        steam_url = _clean(row.get("steam_url")) or steam_url_from_appid(appid)
+        action_params = urllib.parse.urlencode({"appid": appid, "game_name": game_name, "steam_url": steam_url})
         rows.append(
             {
-                "是否选择": _truthy(row.get("selected")),
-                "游戏名": row.get("game_name", "") or f"AppID {row.get('appid', '')}",
-                "AppID": row.get("appid", ""),
-                "来源": row.get("import_source", ""),
-                "开发商": row.get("developer", ""),
-                "发行商": row.get("publisher", ""),
-                "发售状态": row.get("release_status", "") or row.get("release_date", ""),
-                "Demo": row.get("has_demo", ""),
-                "简中": row.get("supports_schinese", ""),
+                "序号": index,
+                "选择": _truthy(row.get("selected")),
+                "头图": row.get("header_image", ""),
+                "游戏名": game_name,
+                "AppID": appid,
+                "开发": row.get("developer", ""),
+                "发行": row.get("publisher", ""),
+                "发售": row.get("release_status", "") or row.get("release_date", ""),
+                "试玩": trial_status_label(row.to_dict()),
+                "中文": chinese_support_status(row.to_dict()),
                 "类型": row.get("genres_tags", ""),
-                "评测": row.get("review_score", ""),
-                "评论数": row.get("review_count", ""),
-                "导入建议": row.get("import_suggestion", ""),
-                "建议理由": row.get("import_reason", ""),
-                "Steam 链接": row.get("steam_url", ""),
-                "来源页面": row.get("source_page_url", ""),
+                "Steam": steam_url,
+                "项目画像": f"?import_action=profile&{action_params}",
             }
         )
     return pd.DataFrame(rows)
+
+
+def content_type_label(row: dict) -> str:
+    raw_type = _clean(row.get("content_type") or row.get("app_type")).casefold()
+    name = _clean(row.get("game_name") or row.get("name") or row.get("title")).casefold()
+    mapping = {
+        "game": "游戏",
+        "demo": "Demo",
+        "dlc": "DLC",
+        "tool": "Tool",
+        "music": "OST",
+        "soundtrack": "OST",
+        "artbook": "Artbook",
+        "software": "Software",
+        "video": "Video",
+        "playtest": "Playtest",
+    }
+    if raw_type in mapping:
+        return mapping[raw_type]
+    keyword_types = [
+        (("playtest",), "Playtest"),
+        (("soundtrack", " ost"), "OST"),
+        (("artbook", "art book"), "Artbook"),
+        ((" demo", "demo "), "Demo"),
+        ((" dlc",), "DLC"),
+    ]
+    for keywords, label in keyword_types:
+        if any(keyword in f" {name} " for keyword in keywords):
+            return label
+    return "Unknown"
+
+
+def trial_status_label(row: dict) -> str:
+    content_type = content_type_label(row)
+    if content_type == "Demo":
+        return "自身为 Demo"
+    if content_type in {"DLC", "Tool", "OST", "Artbook", "Software", "Video"}:
+        return "—"
+    value = row.get("has_demo")
+    if _is_yes(value):
+        return "有"
+    text = _clean(value).casefold()
+    if text in {"no", "false", "0", "n", "否", "无"}:
+        return "无"
+    return "未确认"
+
+
+def chinese_support_status(row: dict) -> str:
+    simplified = _clean(row.get("supports_schinese"))
+    traditional = _clean(row.get("supports_tchinese"))
+    languages = _clean(row.get("supported_languages"))
+    if _is_yes(simplified) or _is_yes(traditional) or _has_chinese_language(languages):
+        return "有"
+    if simplified or traditional or languages:
+        if simplified.casefold() in {"no", "false", "0", "n", "否", "无"} and traditional.casefold() in {"no", "false", "0", "n", "否", "无"}:
+            return "无"
+        if languages and not _has_chinese_language(languages):
+            return "无"
+    return "未确认"
+
+
+def chinese_type_label(row: dict) -> str:
+    languages = _clean(row.get("supported_languages"))
+    simplified = _is_yes(row.get("supports_schinese")) or _has_simplified_chinese(languages)
+    traditional = _is_yes(row.get("supports_tchinese")) or _has_traditional_chinese(languages)
+    if simplified and traditional:
+        return "简中+繁中"
+    if simplified:
+        return "简中"
+    if traditional:
+        return "繁中"
+    return "未确认"
+
+
+def compact_discovered_at(value) -> str:
+    parsed = pd.to_datetime(_clean(value), errors="coerce")
+    if pd.notna(parsed):
+        return parsed.strftime("%Y.%m.%d")
+    return _clean(value) or "待补"
+
+
+def compact_review_text(row: dict) -> str:
+    rate = _clean(row.get("positive_rate"))
+    if rate:
+        try:
+            number = float(rate)
+            rate = f"{number * 100 if number <= 1 else number:.1f}%"
+        except ValueError:
+            pass
+    return rate or "—"
+
+
+def _has_simplified_chinese(value: str) -> bool:
+    text = value.casefold()
+    return "简体中文" in value or "simplified chinese" in text
+
+
+def _has_traditional_chinese(value: str) -> bool:
+    text = value.casefold()
+    return "繁体中文" in value or "traditional chinese" in text
+
+
+def _has_chinese_language(value: str) -> bool:
+    return _has_simplified_chinese(value) or _has_traditional_chinese(value)
 
 
 def update_search_import_selection(csv_path: Path, visible_appids: list[str], selected_appids: list[str]) -> dict:
