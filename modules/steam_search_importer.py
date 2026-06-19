@@ -5,6 +5,7 @@ from html import unescape
 from pathlib import Path
 import json
 import re
+import shutil
 import time
 import urllib.error
 import urllib.parse
@@ -258,22 +259,32 @@ def save_search_import_rows(csv_path: Path, rows: list[dict]) -> dict:
     return stats
 
 
+def backup_search_imports_csv(csv_path: Path) -> Path:
+    ensure_search_import_csv(csv_path)
+    backup_path = csv_path.with_name(f"{csv_path.stem}_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}{csv_path.suffix}")
+    shutil.copy2(csv_path, backup_path)
+    return backup_path
+
+
 def clear_search_imports(csv_path: Path) -> dict:
+    backup_path = backup_search_imports_csv(csv_path)
     data = load_search_imports(csv_path)
     before = len(data)
     pd.DataFrame(columns=STEAM_SEARCH_IMPORT_COLUMNS).to_csv(csv_path, index=False, encoding="utf-8-sig")
-    return {"before": before, "after": 0, "removed": before}
+    return {"before": before, "after": 0, "removed": before, "backup_path": str(backup_path)}
 
 
 def dedupe_search_imports_by_appid(csv_path: Path) -> dict:
+    backup_path = backup_search_imports_csv(csv_path)
     data = load_search_imports(csv_path)
     before = len(data)
     if data.empty:
-        return {"before": before, "after": 0, "removed": 0}
+        data.to_csv(csv_path, index=False, encoding="utf-8-sig")
+        return {"before": before, "after": 0, "removed": 0, "backup_path": str(backup_path)}
     data = data.drop_duplicates(subset=["appid"], keep="last")
     data.to_csv(csv_path, index=False, encoding="utf-8-sig")
     after = len(data)
-    return {"before": before, "after": after, "removed": before - after}
+    return {"before": before, "after": after, "removed": before - after, "backup_path": str(backup_path)}
 
 
 def enrich_search_imports_basic_info(csv_path: Path, appids: list[str] | None = None) -> dict:
