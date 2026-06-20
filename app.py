@@ -10180,12 +10180,11 @@ STEAMDB_LIST_WATCH_COLUMNS = [
 
 def render_steamdb_import_page() -> None:
     st.subheader("SteamDB 粘贴导入")
-    st.caption("SteamDB 不做自动抓取。将 SteamDB 榜单、AppID 或链接复制粘贴到这里，工具会识别 AppID 并导入候选池。")
-    st.caption("用于把 SteamDB 榜单或搜索结果中复制的文本粘贴进来，自动识别 AppID、游戏名、排名、followers、reviews、peak、release、price 等字段，再发送到候选池。")
-    st.caption("本页不硬爬 SteamDB、不调用外部 API，只处理你粘贴的文本。")
+    st.info("操作流程：① 粘贴 SteamDB / Steam 文本　② 解析内容　③ 补全 Steam 基础信息　④ 筛选 / 勾选　⑤ 发送到候选池")
+    st.caption("本页只解析已粘贴文本，不按游戏名搜索。支持 SteamDB / Steam App 链接、AppID、榜单表格文本和多行混合文本；不自动访问或抓取 SteamDB 页面。")
 
     raw_text = st.text_area(
-        "粘贴 SteamDB 列表文本 / 表格文本 / 多行记录",
+        "粘贴 SteamDB / Steam 文本",
         key="steamdb_paste_import_text",
         height=240,
         placeholder=(
@@ -10196,19 +10195,28 @@ def render_steamdb_import_page() -> None:
         ),
     )
 
-    parse_cols = st.columns([1, 1, 1, 1])
+    results = st.session_state.get("steamdb_paste_results", [])
+    parse_cols = st.columns([1, 1, 2])
     if parse_cols[0].button("解析粘贴内容", key="steamdb_paste_parse", use_container_width=True):
         results = parse_steamdb_paste(raw_text)
         st.session_state["steamdb_paste_results"] = results
-        st.session_state["steamdb_paste_selected_labels"] = [
-            _steamdb_import_option_label(index, row)
-            for index, row in enumerate(results)
-            if row.get("parse_confidence") == "high"
-        ]
-        if results:
-            st.success(f"已解析 {len(results)} 行。")
+        set_selected_appids_state("steamdb_import_selected_appids", set())
+        st.session_state["steamdb_import_editor_version"] = int(st.session_state.get("steamdb_import_editor_version", 0)) + 1
+        recognized_count = sum(bool(clean_candidate_value(row.get("appid"))) for row in results)
+        if recognized_count:
+            st.success(f"已解析 {len(results)} 行，识别到 {recognized_count} 个可入池项目。")
+        elif raw_text.strip():
+            st.warning("未识别到 AppID。请粘贴 Steam / SteamDB 链接，或从 SteamDB 榜单复制包含 AppID 的文本。")
         else:
-            st.warning("没有识别到可解析行。")
+            st.warning("请先粘贴 SteamDB / Steam 文本。")
+
+    if parse_cols[1].button("补全基础信息", key="steamdb_enrich_basic_info", use_container_width=True, disabled=not bool(results)):
+        enriched_results, stats = enrich_steamdb_paste_results_basic_info(results)
+        st.session_state["steamdb_paste_results"] = enriched_results
+        st.session_state["steamdb_paste_enrich_stats"] = stats
+        st.session_state["steamdb_import_editor_version"] = int(st.session_state.get("steamdb_import_editor_version", 0)) + 1
+        st.rerun()
+    parse_cols[2].caption("补全开发、发行、发售、内容类型、试玩、中文、价格、头图等字段。")
 
     results = st.session_state.get("steamdb_paste_results", [])
     if results:
@@ -10257,10 +10265,13 @@ def enrich_steamdb_paste_results_basic_info(results: list[dict]) -> tuple[list[d
                 "release_date",
                 "release_status",
                 "price",
-                "review_score",
-                "review_count",
+                "app_type",
                 "has_demo",
                 "supports_schinese",
+                "supports_tchinese",
+                "supported_languages",
+                "genres_tags",
+                "header_image",
             ]:
                 value = clean_candidate_value(info.get(field))
                 if value:
@@ -10394,7 +10405,7 @@ def render_import_action_bar(scope: str, selected_rows: pd.DataFrame, send_callb
             st.toast(f"已发送到候选池：新增 {stats.get('created', 0)}，补空字段 {stats.get('updated', 0)}，已存在 {stats.get('unchanged', 0)}，失败 {stats.get('failed', 0)}")
             st.rerun()
     if cols[1].button("查看已选项目", key=f"{scope}_show_selected_{position}", use_container_width=True):
-        if scope in {"steam_search", "steam_browser"}:
+        if scope in {"steam_search", "steam_browser", "steamdb_import"}:
             st.session_state[f"{scope}_show_selected_preview"] = True
         else:
             st.session_state[f"{scope}_show_selected_preview"] = not bool(st.session_state.get(f"{scope}_show_selected_preview"))
@@ -10402,8 +10413,10 @@ def render_import_action_bar(scope: str, selected_rows: pd.DataFrame, send_callb
     if not browser_scope:
         if cols[2].button("清空当前选择", key=f"{scope}_clear_selected_bar_{position}", use_container_width=True):
             current = set(st.session_state.get(selected_key) or set())
-            next_selected = set() if scope == "steam_search" else current - appids_from_frame(filtered)
+            next_selected = set() if scope in {"steam_search", "steamdb_import"} else current - appids_from_frame(filtered)
             set_selected_appids_state(selected_key, next_selected)
+            if scope == "steamdb_import":
+                st.session_state["steamdb_import_editor_version"] = int(st.session_state.get("steamdb_import_editor_version", 0)) + 1
             st.rerun()
     cols[2 if browser_scope else 3].caption("下一步：筛选项目 -> 选择 -> 发送到候选池 -> 到竞品与候选继续跟进。")
 
@@ -10451,7 +10464,7 @@ def steam_browser_display_data(data: pd.DataFrame) -> pd.DataFrame:
         row = source_row.to_dict()
         appid = clean_candidate_value(row.get("appid"))
         game_name = clean_candidate_value(row.get("game_name")) or f"AppID {appid}"
-        steam_url = clean_candidate_value(row.get("steam_url")) or steam_url_from_appid(appid)
+        steam_url = clean_candidate_value(row.get("steam_url")) or (steam_url_from_appid(appid) if appid else "")
         profile_url = (
             f"?import_action=profile&appid={quote(appid)}&game_name={quote(game_name)}&steam_url={quote(steam_url)}"
         )
@@ -10496,7 +10509,7 @@ def render_steam_browser_dangerous_actions() -> None:
 def render_selected_import_preview(scope: str, selected_rows: pd.DataFrame) -> None:
     if not st.session_state.get(f"{scope}_show_selected_preview"):
         return
-    if scope in {"steam_search", "steam_browser"}:
+    if scope in {"steam_search", "steam_browser", "steamdb_import"}:
         title_cols = st.columns([4, 1])
         title_cols[0].markdown("#### 已选项目预览")
         if title_cols[1].button("收起已选项目", key=f"{scope}_hide_selected_preview", use_container_width=True):
@@ -10508,7 +10521,7 @@ def render_selected_import_preview(scope: str, selected_rows: pd.DataFrame) -> N
         st.info("当前没有已选项目。")
         return
     preview_data = import_preview_dataframe(selected_rows, 30)
-    if scope in {"steam_search", "steam_browser"}:
+    if scope in {"steam_search", "steam_browser", "steamdb_import"}:
         preview_data = preview_data.drop(columns=[column for column in ["导入建议", "建议理由"] if column in preview_data.columns])
     st.dataframe(
         preview_data,
@@ -10553,7 +10566,7 @@ def render_import_snapshot(scope: str, selected_rows: pd.DataFrame, send_callbac
         header_cols[0].markdown(f"#### 当前项目快照：{int(preview_index) + 1}. {game_name}")
     else:
         st.markdown("#### 当前项目快照")
-    steam_url = clean_candidate_value(row.get("steam_url")) or steam_url_from_appid(appid)
+    steam_url = clean_candidate_value(row.get("steam_url")) or (steam_url_from_appid(appid) if appid else "")
     header_image = clean_candidate_value(row.get("header_image") or row.get("image_url"))
     if compact_scope and header_image:
         st.image(header_image, width=320)
@@ -10638,7 +10651,7 @@ def render_import_send_result_panel(scope: str) -> None:
     if action_cols[1].button("查看本次入池项目", key=f"{scope}_toggle_send_details", use_container_width=True):
         st.session_state[f"{scope}_show_send_details"] = not bool(st.session_state.get(f"{scope}_show_send_details", True))
         st.rerun()
-    continue_label = "返回导入列表" if scope in {"steam_search", "steam_browser"} else "继续导入"
+    continue_label = "返回导入列表" if scope in {"steam_search", "steam_browser", "steamdb_import"} else "继续导入"
     if action_cols[2].button(continue_label, key=f"{scope}_continue_import", use_container_width=True):
         st.session_state.pop(f"{scope}_send_result", None)
         st.rerun()
@@ -10655,14 +10668,14 @@ def render_import_send_result_panel(scope: str) -> None:
                         "失败原因": item.get("reason", ""),
                         "Steam": item.get("steam_url", ""),
                 }
-                if scope in {"steam_search", "steam_browser"}:
+                if scope in {"steam_search", "steam_browser", "steamdb_import"}:
                     detail_row["候选池状态"] = {"created": "已入池", "updated": "已存在", "unchanged": "已存在", "failed": "失败"}.get(item.get("result_key", ""), "失败")
                 else:
                     detail_row["下一步建议"] = item.get("next_action", "")
                     detail_row["候选池"] = "竞品与候选"
                 detail_rows.append(detail_row)
             display = pd.DataFrame(detail_rows)
-            if scope in {"steam_search", "steam_browser"}:
+            if scope in {"steam_search", "steam_browser", "steamdb_import"}:
                 display.insert(0, "序号", range(1, len(display) + 1))
             st.dataframe(
                 display,
@@ -10674,62 +10687,125 @@ def render_import_send_result_panel(scope: str) -> None:
                 st.caption("发送明细仅展示前 50 条。")
 
 
-def render_steamdb_import_action_bar(selected_rows: list[dict], position: str = "top") -> None:
-    cols = st.columns([1.3, 1, 1, 2])
-    if cols[0].button("发送到候选池", key=f"steamdb_import_send_bar_{position}", use_container_width=True):
-        if not selected_rows:
-            st.warning("请先选择要发送的项目。")
-        else:
-            batch_id = make_import_batch_id()
-            stats = import_steamdb_paste_rows_to_candidate_pool(selected_rows, batch_id=batch_id)
-            st.session_state["steamdb_import_send_result"] = stats
-            st.toast(f"已发送到候选池：新增 {stats.get('created', 0)}，补空字段 {stats.get('updated', 0)}，已存在 {stats.get('unchanged', 0)}，失败 {stats.get('failed', 0)}")
-            st.rerun()
-    if cols[1].button("查看已选项目", key=f"steamdb_import_show_selected_{position}", use_container_width=True):
-        st.session_state["steamdb_import_show_selected_preview"] = not bool(st.session_state.get("steamdb_import_show_selected_preview"))
+def steamdb_paste_source_label(row: dict) -> str:
+    source_row = clean_candidate_value(row.get("source_row"))
+    if "steamdb.info/app/" in source_row.casefold():
+        return "SteamDB 粘贴"
+    if "store.steampowered.com/app/" in source_row.casefold():
+        return "Steam 链接"
+    if source_row.isdigit():
+        return "AppID 文本"
+    return "SteamDB 榜单文本"
+
+
+def steamdb_paste_display_data(results: list[dict], selected_appids: set[str]) -> pd.DataFrame:
+    rows = []
+    for index, row in enumerate(results, start=1):
+        appid = clean_candidate_value(row.get("appid"))
+        game_name = clean_candidate_value(row.get("game_name")) or (f"AppID {appid}" if appid else "未识别游戏名")
+        steam_url = clean_candidate_value(row.get("steam_url")) or steam_url_from_appid(appid)
+        profile_url = f"?import_action=profile&appid={quote(appid)}&game_name={quote(game_name)}&steam_url={quote(steam_url)}" if appid else ""
+        rows.append(
+            {
+                "序号": index,
+                "选择": bool(appid and appid in selected_appids),
+                "头图": clean_candidate_value(row.get("header_image") or row.get("image_url")),
+                "游戏名": game_name,
+                "AppID": appid,
+                "来源": steamdb_paste_source_label(row),
+                "开发": clean_candidate_value(row.get("developer")) or "待补",
+                "发行": clean_candidate_value(row.get("publisher")) or "待补",
+                "发售": clean_candidate_value(row.get("release_status") or row.get("release_date")) or "待补",
+                "内容": steam_browser_content_label(row),
+                "试玩": trial_status_label(row),
+                "中文": chinese_support_status(row),
+                "类型": clean_candidate_value(row.get("genres_tags") or row.get("genres")) or "待补",
+                "Price": clean_candidate_value(row.get("price")) or "—",
+                "Followers": clean_candidate_value(row.get("followers")) or "—",
+                "Reviews": clean_candidate_value(row.get("reviews")) or "—",
+                "Peak": clean_candidate_value(row.get("peak_ccu")) or "—",
+                "Steam": steam_url,
+                "项目画像": profile_url,
+                "解析备注": clean_candidate_value(row.get("parse_notes")) or "—",
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def steamdb_rows_selected_by_appids(results: list[dict], selected_appids: set[str]) -> pd.DataFrame:
+    selected_rows = []
+    seen: set[str] = set()
+    for row in results:
+        appid = clean_candidate_value(row.get("appid"))
+        if appid and appid in selected_appids and appid not in seen:
+            selected_rows.append(row)
+            seen.add(appid)
+    return pd.DataFrame(selected_rows)
+
+
+def render_steamdb_import_snapshot(selected_rows: pd.DataFrame, fallback_rows: pd.DataFrame) -> None:
+    preview_rows = selected_rows.copy() if not selected_rows.empty else fallback_rows.head(50).copy()
+    if preview_rows.empty:
+        st.markdown("#### 当前项目快照")
+        st.info("当前没有可预览项目。")
+        return
+    preview_rows = preview_rows.reset_index(drop=True)
+    options = list(range(len(preview_rows)))
+    labels = {}
+    for index, preview_row in preview_rows.iterrows():
+        preview_appid = clean_candidate_value(preview_row.get("appid"))
+        preview_name = clean_candidate_value(preview_row.get("game_name")) or (f"AppID {preview_appid}" if preview_appid else "未识别游戏名")
+        labels[index] = f"{index + 1}. {preview_name} | {preview_appid or '无 AppID'}"
+    header_cols = st.columns([2, 1])
+    preview_index = header_cols[1].selectbox(
+        "选择预览项目",
+        options,
+        format_func=lambda value: labels[value],
+        key="steamdb_import_snapshot_preview_index",
+    )
+    row = preview_rows.iloc[int(preview_index)].to_dict()
+    appid = clean_candidate_value(row.get("appid"))
+    game_name = clean_candidate_value(row.get("game_name")) or (f"AppID {appid}" if appid else "未识别游戏名")
+    steam_url = clean_candidate_value(row.get("steam_url")) or steam_url_from_appid(appid)
+    header_cols[0].markdown(f"#### 当前项目快照：{int(preview_index) + 1}. {game_name}")
+    header_image = clean_candidate_value(row.get("header_image") or row.get("image_url"))
+    if header_image:
+        st.image(header_image, width=320)
+    snapshot_rows = [
+        {"字段": "游戏名", "内容": game_name},
+        {"字段": "AppID", "内容": appid or "未识别"},
+        {"字段": "Steam 链接", "内容": steam_url or "—"},
+        {"字段": "来源", "内容": steamdb_paste_source_label(row)},
+        {"字段": "开发", "内容": first_import_value(row, ["developer"])},
+        {"字段": "发行", "内容": first_import_value(row, ["publisher"])},
+        {"字段": "发售状态 / 发售日期", "内容": first_import_value(row, ["release_status", "release_date"])},
+        {"字段": "内容类型", "内容": steam_browser_content_label(row)},
+        {"字段": "试玩状态", "内容": trial_status_label(row)},
+        {"字段": "中文", "内容": chinese_support_status(row)},
+        {"字段": "类型", "内容": first_import_value(row, ["genres_tags", "genres"])},
+        {"字段": "Price", "内容": clean_candidate_value(row.get("price")) or "—"},
+        {"字段": "Followers", "内容": clean_candidate_value(row.get("followers")) or "—"},
+        {"字段": "Reviews", "内容": clean_candidate_value(row.get("reviews")) or "—"},
+        {"字段": "Peak", "内容": clean_candidate_value(row.get("peak_ccu")) or "—"},
+        {"字段": "解析备注", "内容": clean_candidate_value(row.get("parse_notes")) or "—"},
+    ]
+    st.dataframe(pd.DataFrame(snapshot_rows), use_container_width=True, hide_index=True)
+    action_cols = st.columns(3)
+    if steam_url:
+        action_cols[0].link_button("打开 Steam", steam_url, use_container_width=True)
+    if action_cols[1].button("项目画像", key=f"steamdb_import_snapshot_profile_{appid}", use_container_width=True, disabled=not bool(appid)):
+        set_profile_prefill_from_mapping({**row, "appid": appid, "game_name": game_name, "steam_url": steam_url}, source_context="SteamDB 粘贴导入快照")
+        request_nav("profile", profile_focus_appid=appid, profile_focus_name=game_name, profile_focus_steam_url=steam_url)
+    existing = find_candidate_by_appid(CANDIDATE_POOL_CSV_PATH, appid) if appid else {}
+    candidate_label = "已在候选池" if existing else "加入候选池"
+    if action_cols[2].button(candidate_label, key=f"steamdb_import_snapshot_candidate_{appid}", use_container_width=True, disabled=not bool(appid) or bool(existing)):
+        stats = import_steamdb_paste_rows_to_candidate_pool([row], batch_id=make_import_batch_id())
+        st.session_state["steamdb_import_send_result"] = stats
         st.rerun()
-    if cols[2].button("清空当前选择", key=f"steamdb_import_clear_selected_{position}", use_container_width=True):
-        st.session_state["steamdb_paste_selected_labels"] = []
-        st.rerun()
-    cols[3].caption("下一步：选择解析记录 -> 发送到候选池 -> 到竞品与候选继续跟进。")
 
 
 def render_steamdb_paste_results(results: list[dict]) -> None:
-    st.markdown("### 解析结果预览")
-    option_labels = [_steamdb_import_option_label(index, row) for index, row in enumerate(results)]
-    select_cols = st.columns(6)
-    if select_cols[0].button("全选高可信", key="steamdb_select_high", use_container_width=True):
-        st.session_state["steamdb_paste_selected_labels"] = [
-            label
-            for label, row in zip(option_labels, results)
-            if row.get("parse_confidence") == "high"
-        ]
-    if select_cols[1].button("全选有 AppID", key="steamdb_select_appid", use_container_width=True):
-        st.session_state["steamdb_paste_selected_labels"] = [
-            label
-            for label, row in zip(option_labels, results)
-            if str(row.get("appid", "") or "").strip()
-        ]
-    if select_cols[2].button("清空选择", key="steamdb_select_clear", use_container_width=True):
-        st.session_state["steamdb_paste_selected_labels"] = []
-    if select_cols[3].button("导出解析结果 CSV", key="steamdb_export_parse_csv", use_container_width=True):
-        export_path = export_steamdb_parse_results_csv(results)
-        st.success(f"解析结果已导出：{export_path}")
-
-    if select_cols[4].button("补全 Steam 基础信息", key="steamdb_enrich_basic_info", use_container_width=True):
-        previous_selected = st.session_state.get("steamdb_paste_selected_labels", [])
-        selected_index_before = {option_labels.index(label) for label in previous_selected if label in option_labels}
-        enriched_results, stats = enrich_steamdb_paste_results_basic_info(results)
-        st.session_state["steamdb_paste_results"] = enriched_results
-        refreshed_labels = [_steamdb_import_option_label(index, row) for index, row in enumerate(enriched_results)]
-        st.session_state["steamdb_paste_selected_labels"] = [
-            refreshed_labels[index]
-            for index in selected_index_before
-            if index < len(refreshed_labels)
-        ]
-        st.session_state["steamdb_paste_enrich_stats"] = stats
-        st.rerun()
-
+    st.markdown("### 解析结果")
     enrich_stats = st.session_state.get("steamdb_paste_enrich_stats", {})
     if enrich_stats:
         st.info(
@@ -10742,47 +10818,64 @@ def render_steamdb_paste_results(results: list[dict]) -> None:
         if enrich_stats.get("cache_warning"):
             st.warning(str(enrich_stats.get("cache_warning")))
 
-    selected_labels = st.multiselect(
-        "选择要导入候选池的记录",
-        option_labels,
-        default=st.session_state.get("steamdb_paste_selected_labels", []),
-        key="steamdb_paste_selected_labels",
-    )
-    selected_index = {option_labels.index(label) for label in selected_labels if label in option_labels}
-    selected_rows = [row for index, row in enumerate(results) if index in selected_index]
-    render_import_selection_status(len(results), len(selected_rows))
-    render_steamdb_import_action_bar(selected_rows, position="top")
-    preview_rows = []
-    for index, row in enumerate(results):
-        preview_rows.append(
-            {
-                "是否选择": "是" if index in selected_index else "",
-                "游戏名": row.get("game_name", ""),
-                "AppID": row.get("appid", ""),
-                "Developer": row.get("developer", ""),
-                "Publisher": row.get("publisher", ""),
-                "Rank": row.get("rank", ""),
-                "Followers": row.get("followers", ""),
-                "Reviews": row.get("reviews", ""),
-                "Peak": row.get("peak_ccu", ""),
-                "Rating": row.get("rating", ""),
-                "Release": row.get("release_date", ""),
-                "Release Status": row.get("release_status", ""),
-                "Price": row.get("price", ""),
-                "Demo": row.get("has_demo", ""),
-                "简中": row.get("supports_schinese", ""),
-                "Steam": row.get("steam_url", ""),
-                "解析可信度": row.get("parse_confidence", ""),
-                "解析备注": row.get("parse_notes", ""),
-            }
-        )
-    st.dataframe(pd.DataFrame(preview_rows), use_container_width=True, hide_index=True)
+    results_df = pd.DataFrame(results)
+    selectable_appids = appids_from_frame(results_df)
+    selected_key = "steamdb_import_selected_appids"
+    selected_appids = ensure_selected_appids_state(selected_key, results_df) & selectable_appids
+    set_selected_appids_state(selected_key, selected_appids)
 
-    render_steamdb_import_action_bar(selected_rows, position="bottom")
-    selected_df = pd.DataFrame(selected_rows)
+    st.markdown("#### 批量选择")
+    select_cols = st.columns(2)
+    if select_cols[0].button("全选可入池项目", key="steamdb_select_importable", help="只选择已识别 AppID 的项目，避免无效记录进入候选池。", use_container_width=True):
+        set_selected_appids_state(selected_key, selectable_appids)
+        st.session_state["steamdb_import_editor_version"] = int(st.session_state.get("steamdb_import_editor_version", 0)) + 1
+        st.rerun()
+    if select_cols[1].button("反选当前筛选结果", key="steamdb_select_invert", use_container_width=True):
+        set_selected_appids_state(selected_key, selectable_appids - selected_appids)
+        st.session_state["steamdb_import_editor_version"] = int(st.session_state.get("steamdb_import_editor_version", 0)) + 1
+        st.rerun()
+
+    display = steamdb_paste_display_data(results, selected_appids)
+    column_config = {
+        "选择": st.column_config.CheckboxColumn("选择"),
+        "头图": st.column_config.ImageColumn("头图", width="small"),
+        "Steam": st.column_config.LinkColumn("Steam", display_text="打开 Steam"),
+        "项目画像": st.column_config.LinkColumn("项目画像", display_text="打开画像"),
+    }
+    editor_version = int(st.session_state.get("steamdb_import_editor_version", 0))
+    edited_display = st.data_editor(
+        display,
+        key=f"steamdb_import_editor_{editor_version}",
+        use_container_width=True,
+        hide_index=True,
+        column_config=column_config,
+        disabled=[column for column in display.columns if column != "选择"],
+    )
+    editor_selected = {
+        appid
+        for appid in edited_display.loc[edited_display["选择"].astype(bool), "AppID"].astype(str).str.strip().tolist()
+        if appid
+    }
+    selected_appids = editor_selected & selectable_appids
+    set_selected_appids_state(selected_key, selected_appids)
+
+    stat_cols = st.columns(3)
+    stat_cols[0].metric("当前解析", len(results))
+    stat_cols[1].metric("可入池", len(selectable_appids))
+    stat_cols[2].metric("已选择", len(selected_appids))
+
+    selected_df = steamdb_rows_selected_by_appids(results, selected_appids)
+    render_import_action_bar("steamdb_import", selected_df, import_steamdb_paste_rows_to_candidate_pool, selected_key, results_df, position="table")
     render_selected_import_preview("steamdb_import", selected_df)
-    render_import_snapshot("steamdb_import", selected_df, import_steamdb_paste_rows_to_candidate_pool)
+    render_steamdb_import_snapshot(selected_df, results_df)
     render_import_send_result_panel("steamdb_import")
+
+    with st.expander("导出 / 调试", expanded=False):
+        if st.button("导出解析结果 CSV", key="steamdb_export_parse_csv"):
+            export_path = export_steamdb_parse_results_csv(results)
+            st.success(f"解析结果已导出：{export_path}")
+        if SHOW_DEBUG_INFO:
+            st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True)
 
 
 def _steamdb_import_option_label(index: int, row: dict) -> str:
@@ -10846,7 +10939,7 @@ def save_steamdb_list_watch_note(note: dict) -> Path:
 def render_steamdb_list_watch_note_section(results: list[dict]) -> None:
     with st.expander("榜单观察记录", expanded=False):
         st.caption("记录今天看过的 SteamDB 页面，避免重复翻同一页。")
-        selected_count = len(st.session_state.get("steamdb_paste_selected_labels", []))
+        selected_count = len(st.session_state.get("steamdb_import_selected_appids", set()))
         with st.form("steamdb_list_watch_note_form"):
             col1, col2, col3 = st.columns(3)
             with col1:
