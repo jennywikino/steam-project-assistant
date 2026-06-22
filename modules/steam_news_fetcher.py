@@ -33,13 +33,19 @@ def get_steam_news_for_app(
     count: int = 5,
     maxlength: int = 500,
     force_refresh: bool = False,
+    language: str = "schinese",
 ) -> dict:
     clean_appid = str(appid or "").strip()
     if not clean_appid.isdigit():
         return _empty_result(clean_appid, "invalid", "AppID 无效")
 
-    cache_path = cache_dir / f"{clean_appid}.json"
+    clean_language = str(language or "schinese").strip() or "schinese"
+    cache_suffix = re.sub(r"[^A-Za-z0-9_-]+", "_", clean_language)
+    cache_path = cache_dir / f"{clean_appid}_{cache_suffix}.json"
+    legacy_cache_path = cache_dir / f"{clean_appid}.json"
     cached = _load_cache(cache_path)
+    if not cached and clean_language == "schinese":
+        cached = _load_cache(legacy_cache_path)
     if cached and not force_refresh and _cache_is_fresh(cached):
         cached = _normalize_result(cached)
         cached["status"] = "cache"
@@ -47,7 +53,7 @@ def get_steam_news_for_app(
         return cached
 
     try:
-        result = _fetch_steam_news(clean_appid, count=count, maxlength=maxlength)
+        result = _fetch_steam_news(clean_appid, count=count, maxlength=maxlength, language=clean_language)
     except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError) as exc:
         if cached:
             cached = _normalize_result(cached)
@@ -101,12 +107,13 @@ def steam_news_status_label(news_result: dict | None) -> str:
     return "暂无"
 
 
-def _fetch_steam_news(appid: str, count: int, maxlength: int) -> dict:
+def _fetch_steam_news(appid: str, count: int, maxlength: int, language: str = "schinese") -> dict:
     params = {
         "appid": appid,
         "count": str(max(1, min(int(count or 5), 20))),
         "maxlength": str(max(100, min(int(maxlength or 500), 1000))),
         "format": "json",
+        "l": str(language or "schinese"),
     }
     request = Request(
         STEAM_NEWS_API_URL + "?" + urlencode(params),

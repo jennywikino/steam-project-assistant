@@ -15,6 +15,11 @@ APPREVIEWS_URL = "https://store.steampowered.com/appreviews/{appid}"
 CACHE_TTL_HOURS = 6
 REQUEST_TIMEOUT_SECONDS = 10
 MIN_REQUEST_INTERVAL_SECONDS = 0.8
+REVIEW_BUCKETS = {
+    "recent": {"filter_name": "recent", "review_type": "all"},
+    "helpful": {"filter_name": "all", "review_type": "all"},
+    "negative": {"filter_name": "recent", "review_type": "negative"},
+}
 _last_request_at = 0.0
 
 
@@ -26,40 +31,100 @@ def get_steam_review_preview(
     force_refresh: bool = False,
 ) -> dict:
     clean_appid = str(appid or "").strip()
+    clean_language = _safe_cache_token(language or "schinese")
+    clean_num = max(1, min(int(num_per_group or 3), 5))
     if not clean_appid.isdigit():
         return _empty_result(clean_appid, "获取失败", "AppID 无效")
 
-    cache_path = cache_dir / f"{clean_appid}.json"
-    cached = _load_cache(cache_path)
-    if cached and not force_refresh and _cache_is_fresh(cached):
-        cached = _normalize_result(cached)
-        cached["status"] = "使用缓存"
-        cached["error_message"] = ""
-        return cached
+    bucket_results: dict[str, dict] = {}
+    errors: list[str] = []
+    any_fresh_fetch = False
+    any_stale_cache = False
+    any_cache = False
+    helpful_sort_limited = False
 
-    try:
-        result = _fetch_review_preview(clean_appid, language=language, num_per_group=num_per_group)
-    except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError) as exc:
-        if cached:
-            cached = _normalize_result(cached)
-            cached["status"] = "使用旧缓存"
-            cached["error_message"] = f"获取失败，使用旧缓存：{exc}"
-            return cached
-        return _empty_result(clean_appid, "获取失败", f"获取失败：{exc}")
+    for bucket, params in REVIEW_BUCKETS.items():
+        cache_path = _bucket_cache_path(cache_dir, clean_appid, clean_language, bucket)
+        cached = _load_cache(cache_path)
+        cache_fresh = bool(cached and _cache_is_fresh(cached))
+        if cached and not force_refresh and cache_fresh:
+            bucket_result = _normalize_bucket_result(cached, clean_appid, bucket)
+            bucket_result["status"] = "使用缓存"
+            any_cache = True
+        else:
+            try:
+                bucket_result = _fetch_review_bucket(
+                    clean_appid,
+                    language=clean_language,
+                    bucket=bucket,
+                    filter_name=params["filter_name"],
+                    review_type=params["review_type"],
+                    num_per_group=clean_num,
+                )
+                _save_cache(cache_path, bucket_result)
+                any_fresh_fetch = True
+            except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError, ValueError) as exc:
+                if cached:
+                    bucket_result = _normalize_bucket_result(cached, clean_appid, bucket)
+                    bucket_result["status"] = "使用旧缓存"
+                    bucket_result["error_message"] = f"{bucket} 获取失败，使用旧缓存：{exc}"
+                    any_stale_cache = True
+                    errors.append(bucket_result["error_message"])
+                else:
+                    bucket_result = _empty_bucket_result(clean_appid, bucket, "获取失败", f"{bucket} 获取失败：{exc}")
+                    errors.append(bucket_result["error_message"])
+        if bucket == "helpful" and bucket_result.get("helpful_sort_limited"):
+            helpful_sort_limited = True
+        bucket_results[bucket] = bucket_result
 
-    _save_cache(cache_path, result)
-    return result
+    recent_reviews = bucket_results.get("recent", {}).get("reviews", [])[:clean_num]
+    helpful_reviews = bucket_results.get("helpful", {}).get("reviews", [])[:clean_num]
+    negative_reviews = [
+        row for row in bucket_results.get("negative", {}).get("reviews", [])
+        if row.get("voted_up") is False
+    ][:clean_num]
+    summary = _first_summary(bucket_results, ["recent", "helpful", "negative"])
+    if any_fresh_fetch:
+        status = "已获取"
+    elif any_cache:
+        status = "使用缓存"
+    elif any_stale_cache:
+        status = "使用旧缓存"
+    else:
+        status = "获取失败" if errors else "暂无"
+    if status != "获取失败" and not any([recent_reviews, helpful_reviews, negative_reviews]):
+        status = "暂无"
+
+    return _normalize_result(
+        {
+            "appid": clean_appid,
+            "status": status,
+            "fetched_at": _now(),
+            "summary": summary,
+            "recent_reviews": recent_reviews,
+            "helpful_reviews": helpful_reviews,
+            "negative_reviews": negative_reviews,
+            "error_message": "；".join(item for item in errors if item),
+            "review_bucket_cache_keys": {
+                bucket: f"{clean_appid}_{clean_language}_{bucket}" for bucket in REVIEW_BUCKETS
+            },
+            "bucket_status": {
+                bucket: bucket_results.get(bucket, {}).get("status", "暂无") for bucket in REVIEW_BUCKETS
+            },
+            "helpful_sort_limited": helpful_sort_limited,
+        }
+    )
 
 
 def build_steam_review_preview_markdown_section(review_result: dict | None) -> str:
     result = _normalize_result(review_result or {})
     groups = [
-        ("最近中文评论", result.get("recent_reviews", [])),
-        ("高价值评论", result.get("helpful_reviews", [])),
+        ("最近评论", result.get("recent_reviews", [])),
+        ("高赞 / 高价值评论", result.get("helpful_reviews", [])),
         ("差评样本", result.get("negative_reviews", [])),
     ]
     if not any(items for _, items in groups):
-        return "## Steam 评论预览\n\n暂无中文评论样本，可打开 Steam 评论页人工查看。\n"
+        return "## Steam 评论预览\n\n未抓到中文评论正文；评分与评论数仍可参考，可打开 Steam 评论页人工查看。\n"
 
     summary = result.get("summary", {}) if isinstance(result.get("summary"), dict) else {}
     lines = ["## Steam 评论预览", ""]
@@ -76,7 +141,10 @@ def build_steam_review_preview_markdown_section(review_result: dict | None) -> s
             continue
         for item in items:
             vote = "推荐" if item.get("voted_up") else "不推荐"
-            lines.append(f"- {vote} · {item.get('created_at') or '未获取'} · 游玩 {format_playtime(item.get('author_playtime_at_review') or item.get('author_playtime_forever'))}")
+            lines.append(
+                f"- {vote} · {item.get('created_at') or '未获取'} · "
+                f"游玩 {format_playtime(item.get('author_playtime_at_review') or item.get('author_playtime_forever'))}"
+            )
             lines.append(f"  - 点赞：{_display(item.get('votes_up'))}")
             lines.append(f"  - 正文：{_display(item.get('review_preview') or item.get('review'))[:200]}")
             url = str(item.get("review_url", "") or "").strip()
@@ -116,35 +184,54 @@ def format_playtime(minutes) -> str:
     return f"{round(value / 60, 1)} 小时"
 
 
-def _fetch_review_preview(appid: str, language: str, num_per_group: int) -> dict:
+def _fetch_review_bucket(
+    appid: str,
+    *,
+    language: str,
+    bucket: str,
+    filter_name: str,
+    review_type: str,
+    num_per_group: int,
+) -> dict:
     clean_num = max(1, min(int(num_per_group or 3), 5))
-    recent_payload = _request_appreviews(appid, filter_name="recent", language=language, review_type="all", num_per_page=max(20, clean_num * 4))
-    helpful_payload = _request_appreviews(appid, filter_name="all", language=language, review_type="all", num_per_page=max(20, clean_num * 4))
-    negative_payload = _request_appreviews(appid, filter_name="recent", language=language, review_type="negative", num_per_page=max(20, clean_num * 4))
-
-    recent_reviews = [_normalize_review(item, appid) for item in _review_rows(recent_payload)]
-    helpful_reviews = [_normalize_review(item, appid) for item in _review_rows(helpful_payload)]
-    negative_reviews = [_normalize_review(item, appid) for item in _review_rows(negative_payload)]
-    helpful_reviews = sorted(
-        helpful_reviews,
-        key=lambda row: (float(row.get("weighted_vote_score") or 0), int(row.get("votes_up") or 0)),
-        reverse=True,
+    payload = _request_appreviews(
+        appid,
+        filter_name=filter_name,
+        language=language,
+        review_type=review_type,
+        num_per_page=max(20, clean_num * 4),
     )
+    reviews = [_normalize_review(item, appid) for item in _review_rows(payload)]
+    helpful_sort_limited = False
+    if bucket == "recent":
+        reviews = sorted(reviews, key=lambda row: _to_int(row.get("timestamp_created")), reverse=True)
+    elif bucket == "helpful":
+        has_usefulness_fields = any(
+            _to_float(row.get("weighted_vote_score")) > 0 or _to_int(row.get("votes_up")) > 0
+            for row in reviews
+        )
+        helpful_sort_limited = not has_usefulness_fields
+        if has_usefulness_fields:
+            reviews = sorted(
+                reviews,
+                key=lambda row: (_to_float(row.get("weighted_vote_score")), _to_int(row.get("votes_up"))),
+                reverse=True,
+            )
+    elif bucket == "negative":
+        reviews = [row for row in reviews if row.get("voted_up") is False]
+        reviews = sorted(reviews, key=lambda row: _to_int(row.get("timestamp_created")), reverse=True)
 
-    summary = _summary_from_payload(recent_payload or helpful_payload or negative_payload)
     result = {
         "appid": appid,
-        "status": "已获取",
+        "bucket": bucket,
+        "status": "已获取" if reviews else "暂无",
         "fetched_at": _now(),
-        "summary": summary,
-        "recent_reviews": recent_reviews[:clean_num],
-        "helpful_reviews": helpful_reviews[:clean_num],
-        "negative_reviews": negative_reviews[:clean_num],
+        "summary": _summary_from_payload(payload),
+        "reviews": reviews[:clean_num],
         "error_message": "",
+        "helpful_sort_limited": helpful_sort_limited,
     }
-    if not any([result["recent_reviews"], result["helpful_reviews"], result["negative_reviews"]]):
-        result["status"] = "暂无"
-    return _normalize_result(result)
+    return _normalize_bucket_result(result, appid, bucket)
 
 
 def _request_appreviews(appid: str, filter_name: str, language: str, review_type: str, num_per_page: int) -> dict:
@@ -164,7 +251,7 @@ def _request_appreviews(appid: str, filter_name: str, language: str, review_type
     request = Request(
         APPREVIEWS_URL.format(appid=appid) + "?" + urlencode(params),
         headers={
-            "User-Agent": "steam-project-assistant/0.6.13 (+review-preview)",
+            "User-Agent": "steam-project-assistant/0.8.5 (+review-preview)",
             "Accept": "application/json,*/*;q=0.8",
         },
     )
@@ -183,8 +270,25 @@ def _normalize_result(result: dict) -> dict:
         "summary": _normalize_summary(summary),
         "recent_reviews": [_normalize_review(row, appid) for row in result.get("recent_reviews", []) if isinstance(row, dict)],
         "helpful_reviews": [_normalize_review(row, appid) for row in result.get("helpful_reviews", []) if isinstance(row, dict)],
-        "negative_reviews": [_normalize_review(row, appid) for row in result.get("negative_reviews", []) if isinstance(row, dict)],
+        "negative_reviews": [_normalize_review(row, appid) for row in result.get("negative_reviews", []) if isinstance(row, dict) and row.get("voted_up") is False],
         "error_message": str(result.get("error_message", "") or ""),
+        "review_bucket_cache_keys": result.get("review_bucket_cache_keys", {}) if isinstance(result.get("review_bucket_cache_keys"), dict) else {},
+        "bucket_status": result.get("bucket_status", {}) if isinstance(result.get("bucket_status"), dict) else {},
+        "helpful_sort_limited": bool(result.get("helpful_sort_limited")),
+    }
+
+
+def _normalize_bucket_result(result: dict, appid: str, bucket: str) -> dict:
+    summary = result.get("summary", {}) if isinstance(result.get("summary"), dict) else {}
+    return {
+        "appid": str(result.get("appid", "") or appid),
+        "bucket": str(result.get("bucket", "") or bucket),
+        "status": str(result.get("status", "") or "暂无"),
+        "fetched_at": str(result.get("fetched_at", "") or ""),
+        "summary": _normalize_summary(summary),
+        "reviews": [_normalize_review(row, appid) for row in result.get("reviews", []) if isinstance(row, dict)],
+        "error_message": str(result.get("error_message", "") or ""),
+        "helpful_sort_limited": bool(result.get("helpful_sort_limited")),
     }
 
 
@@ -236,6 +340,15 @@ def _review_rows(payload: dict) -> list[dict]:
     return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
 
 
+def _first_summary(bucket_results: dict[str, dict], buckets: list[str]) -> dict:
+    for bucket in buckets:
+        summary = bucket_results.get(bucket, {}).get("summary", {})
+        normalized = _normalize_summary(summary if isinstance(summary, dict) else {})
+        if normalized.get("review_total") or normalized.get("review_score_desc"):
+            return normalized
+    return _normalize_summary({})
+
+
 def _empty_result(appid: str, status: str, error_message: str = "") -> dict:
     return {
         "appid": str(appid or ""),
@@ -246,7 +359,36 @@ def _empty_result(appid: str, status: str, error_message: str = "") -> dict:
         "helpful_reviews": [],
         "negative_reviews": [],
         "error_message": error_message,
+        "review_bucket_cache_keys": {},
+        "bucket_status": {},
+        "helpful_sort_limited": False,
     }
+
+
+def _empty_bucket_result(appid: str, bucket: str, status: str, error_message: str = "") -> dict:
+    return _normalize_bucket_result(
+        {
+            "appid": appid,
+            "bucket": bucket,
+            "status": status,
+            "fetched_at": _now(),
+            "summary": {},
+            "reviews": [],
+            "error_message": error_message,
+            "helpful_sort_limited": False,
+        },
+        appid,
+        bucket,
+    )
+
+
+def _bucket_cache_path(cache_dir: Path, appid: str, language: str, bucket: str) -> Path:
+    return cache_dir / f"{appid}_{_safe_cache_token(language)}_{_safe_cache_token(bucket)}.json"
+
+
+def _safe_cache_token(value: str) -> str:
+    token = re.sub(r"[^A-Za-z0-9_-]+", "_", str(value or "").strip())
+    return token or "default"
 
 
 def _load_cache(cache_path: Path) -> dict:
@@ -262,7 +404,7 @@ def _load_cache(cache_path: Path) -> dict:
 def _save_cache(cache_path: Path, result: dict) -> None:
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        cache_path.write_text(json.dumps(_normalize_result(result), ensure_ascii=False, indent=2), encoding="utf-8")
+        cache_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     except OSError:
         return
 

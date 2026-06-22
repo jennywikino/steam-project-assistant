@@ -15,13 +15,34 @@ NUMBER_RE = re.compile(r"\b\d[\d,]*(?:\.\d+)?\b")
 
 
 def parse_steamdb_paste(text: str) -> list[dict]:
-    rows: list[dict] = []
-    for raw_line in str(text or "").splitlines():
+    return [_parse_line(record) for record in _split_paste_records(str(text or ""))]
+
+
+def _split_paste_records(text: str) -> list[str]:
+    stripped = text.strip()
+    if not stripped:
+        return []
+
+    pure_appid_list = re.fullmatch(r"\s*\d{3,10}(?:[\s,，;；]+\d{3,10})+\s*", stripped)
+    if pure_appid_list:
+        return re.findall(r"\d{3,10}", stripped)
+
+    records: list[str] = []
+    for raw_line in stripped.splitlines():
         line = raw_line.strip()
         if not line:
             continue
-        rows.append(_parse_line(line))
-    return rows
+        fragments = re.split(r"[，;；]+|(?<!\d),|,(?!\d)", line)
+        for fragment in fragments:
+            clean_fragment = fragment.strip()
+            if not clean_fragment:
+                continue
+            tab_parts = [part.strip() for part in clean_fragment.split("\t") if part.strip()]
+            if len(tab_parts) <= 3:
+                records.extend(tab_parts)
+            else:
+                records.append(clean_fragment)
+    return records
 
 
 def _parse_line(line: str) -> dict:
@@ -37,7 +58,7 @@ def _parse_line(line: str) -> dict:
     if appid_source:
         notes.append(f"AppID: {appid_source}")
     if not appid:
-        notes.append("未识别 AppID")
+        notes.append("未识别 AppID；请输入 Steam / SteamDB App 链接或纯 AppID")
     if not game_name:
         notes.append("未识别游戏名")
     if not any([followers, reviews, peak_ccu, rating, price, release_date]):

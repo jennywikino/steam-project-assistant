@@ -12,11 +12,9 @@ from modules.publishing_rules import evaluate_publishing_candidate
 
 
 STAGE_OPTIONS = [
-    "新发现",
     "待补资料",
     "待试玩",
-    "待社媒确认",
-    "待开发商调查",
+    "待评估",
     "值得联系",
     "已联系",
     "暂缓",
@@ -25,9 +23,30 @@ STAGE_OPTIONS = [
 
 PRIORITY_OPTIONS = ["高", "中", "低", "未定"]
 
+LEGACY_STAGE_MAP = {
+    "": "待评估",
+    "新发现": "待评估",
+    "待社媒确认": "待评估",
+    "待开发商调查": "待评估",
+    "已放弃": "放弃",
+}
+
+LEGACY_STAGE_NEXT_ACTION = {
+    "待社媒确认": "查社媒",
+    "待开发商调查": "查开发商背景",
+}
+
+PRIORITY_ALIASES = {
+    "": "未定",
+    "未设": "未定",
+    "未设置": "未定",
+    "未定": "未定",
+}
+
 CANDIDATE_POOL_COLUMNS = [
     "candidate_id",
     "created_at",
+    "imported_at",
     "updated_at",
     "appid",
     "game_name",
@@ -39,14 +58,23 @@ CANDIDATE_POOL_COLUMNS = [
     "release_date",
     "has_demo",
     "supports_schinese",
+    "supports_tchinese",
+    "supports_chinese",
     "genres_tags",
     "price",
     "review_score",
     "review_count",
+    "positive_rate",
+    "header_image",
+    "image_url",
+    "app_type",
     "median_playtime",
     "avg_playtime",
     "source",
+    "source_page",
     "source_url",
+    "batch_id",
+    "import_method",
     "priority",
     "stage",
     "next_action",
@@ -72,6 +100,7 @@ CANDIDATE_POOL_COLUMNS = [
 CANDIDATE_POOL_FIELD_LABELS = {
     "candidate_id": "候选 ID",
     "created_at": "创建时间",
+    "imported_at": "入池时间",
     "updated_at": "更新时间",
     "appid": "AppID",
     "game_name": "游戏名",
@@ -83,21 +112,30 @@ CANDIDATE_POOL_FIELD_LABELS = {
     "release_date": "发售日期",
     "has_demo": "Demo",
     "supports_schinese": "简中",
+    "supports_tchinese": "繁中",
+    "supports_chinese": "中文",
     "genres_tags": "类型",
     "price": "价格",
     "review_score": "评分",
     "review_count": "评论数",
+    "positive_rate": "好评率",
+    "header_image": "头图",
+    "image_url": "图片",
+    "app_type": "内容类型",
     "median_playtime": "中位游玩",
     "avg_playtime": "平均游玩",
     "source": "来源",
+    "source_page": "来源页面",
     "source_url": "来源链接",
+    "batch_id": "导入批次",
+    "import_method": "导入方式",
     "priority": "优先级",
     "stage": "当前阶段",
     "next_action": "下一步动作",
     "owner_note": "备注",
     "reject_reason": "放弃原因",
-    "auto_suggestion": "自动建议",
-    "auto_reason": "建议理由",
+    "auto_suggestion": "本地建议",
+    "auto_reason": "本地建议理由",
     "data_completeness": "数据完整度",
     "missing_items": "缺失项",
     "market_data_source": "第三方市场来源",
@@ -135,6 +173,7 @@ POOL_TABLE_COLUMNS = [
 POOL_FULL_TABLE_COLUMNS = [
     "candidate_id",
     "created_at",
+    "imported_at",
     "updated_at",
     "appid",
     "game_name",
@@ -146,14 +185,23 @@ POOL_FULL_TABLE_COLUMNS = [
     "release_date",
     "has_demo",
     "supports_schinese",
+    "supports_tchinese",
+    "supports_chinese",
     "genres_tags",
     "price",
     "review_score",
     "review_count",
+    "positive_rate",
+    "header_image",
+    "image_url",
+    "app_type",
     "median_playtime",
     "avg_playtime",
     "source",
+    "source_page",
     "source_url",
+    "batch_id",
+    "import_method",
     "priority",
     "stage",
     "auto_suggestion",
@@ -282,6 +330,38 @@ def _now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def normalize_candidate_stage(value) -> str:
+    text = str(value or "").strip()
+    mapped = LEGACY_STAGE_MAP.get(text, text)
+    return mapped if mapped in STAGE_OPTIONS else "待评估"
+
+
+def normalize_candidate_priority(value) -> str:
+    text = str(value or "").strip()
+    mapped = PRIORITY_ALIASES.get(text, text)
+    return mapped if mapped in PRIORITY_OPTIONS else "未定"
+
+
+def default_next_action_for_stage(stage: str) -> str:
+    return {
+        "待补资料": "补项目画像",
+        "待试玩": "试玩 Demo",
+        "待评估": "人工复核",
+        "值得联系": "查联系方式",
+        "已联系": "等待回复",
+        "暂缓": "暂缓观察",
+        "放弃": "无需跟进",
+    }.get(normalize_candidate_stage(stage), "人工复核")
+
+
+def normalize_next_action_for_stage(raw_stage, current_next_action) -> str:
+    current = str(current_next_action or "").strip()
+    raw = str(raw_stage or "").strip()
+    if current:
+        return current
+    return LEGACY_STAGE_NEXT_ACTION.get(raw) or default_next_action_for_stage(raw)
+
+
 @dataclass
 class CandidatePoolRecord:
     appid: str = ""
@@ -294,16 +374,25 @@ class CandidatePoolRecord:
     release_date: str = ""
     has_demo: str = ""
     supports_schinese: str = ""
+    supports_tchinese: str = ""
+    supports_chinese: str = ""
     genres_tags: str = ""
     price: str = ""
     review_score: str = ""
     review_count: str = ""
+    positive_rate: str = ""
+    header_image: str = ""
+    image_url: str = ""
+    app_type: str = ""
     median_playtime: str = ""
     avg_playtime: str = ""
     source: str = ""
+    source_page: str = ""
     source_url: str = ""
+    batch_id: str = ""
+    import_method: str = ""
     priority: str = "未定"
-    stage: str = "新发现"
+    stage: str = "待评估"
     next_action: str = ""
     owner_note: str = ""
     reject_reason: str = ""
@@ -324,6 +413,7 @@ class CandidatePoolRecord:
     is_archived: str = "False"
     candidate_id: str = field(default_factory=lambda: str(uuid4()))
     created_at: str = field(default_factory=_now_text)
+    imported_at: str = field(default_factory=_now_text)
     updated_at: str = field(default_factory=_now_text)
 
 
@@ -349,7 +439,7 @@ def ensure_candidate_pool_csv_exists(csv_path: Path) -> None:
         if missing_id.any():
             existing.loc[missing_id, "candidate_id"] = [str(uuid4()) for _ in range(int(missing_id.sum()))]
             changed = True
-    for column, default in {"priority": "未定", "stage": "新发现", "is_archived": "False"}.items():
+    for column, default in {"priority": "未定", "stage": "待评估", "is_archived": "False"}.items():
         missing = existing[column].astype(str).str.strip() == ""
         if missing.any():
             existing.loc[missing, column] = default
@@ -368,14 +458,16 @@ def load_candidate_pool(csv_path: Path) -> pd.DataFrame:
     for column in CANDIDATE_POOL_COLUMNS:
         if column not in data.columns:
             data[column] = ""
-    return data.loc[:, CANDIDATE_POOL_COLUMNS].copy()
+    extra_columns = [column for column in data.columns if column not in CANDIDATE_POOL_COLUMNS]
+    return data.loc[:, CANDIDATE_POOL_COLUMNS + extra_columns].copy()
 
 
 def candidate_pool_record_to_dict(record: CandidatePoolRecord) -> dict:
     raw = asdict(record)
     output = {column: str(raw.get(column, "") or "").strip() for column in CANDIDATE_POOL_COLUMNS}
-    output["priority"] = output["priority"] if output["priority"] in PRIORITY_OPTIONS else "未定"
-    output["stage"] = output["stage"] if output["stage"] in STAGE_OPTIONS else "新发现"
+    output["priority"] = normalize_candidate_priority(output["priority"])
+    output["stage"] = normalize_candidate_stage(output["stage"])
+    output["next_action"] = normalize_next_action_for_stage(raw.get("stage"), output["next_action"])
     output["is_archived"] = output["is_archived"] or "False"
     return output
 
@@ -404,10 +496,16 @@ def upsert_candidate_pool_record(record: CandidatePoolRecord, csv_path: Path) ->
             "release_date",
             "has_demo",
             "supports_schinese",
+            "supports_tchinese",
+            "supports_chinese",
             "genres_tags",
             "price",
             "review_score",
             "review_count",
+            "positive_rate",
+            "header_image",
+            "image_url",
+            "app_type",
             "median_playtime",
             "avg_playtime",
             "auto_suggestion",
@@ -425,9 +523,12 @@ def upsert_candidate_pool_record(record: CandidatePoolRecord, csv_path: Path) ->
             "gamalytic_owners",
             "latest_news_date",
             "source",
+            "source_page",
             "source_url",
+            "batch_id",
+            "import_method",
         ]:
-            if row.get(column):
+            if row.get(column) and (column not in {"source", "source_page", "source_url", "batch_id", "import_method"} or not str(data.loc[index, column] or "").strip()):
                 data.loc[index, column] = row[column]
         data.to_csv(csv_path, index=False, encoding="utf-8-sig")
         return csv_path, "updated"
@@ -438,6 +539,7 @@ def upsert_candidate_pool_record(record: CandidatePoolRecord, csv_path: Path) ->
         row["stage"] = "待补资料"
         row["next_action"] = row.get("next_action") or "资料不足：补 AppID / Steam 链接"
     row["created_at"] = now
+    row["imported_at"] = row.get("imported_at") or now
     row["updated_at"] = now
     data = pd.concat([data, pd.DataFrame([row], columns=CANDIDATE_POOL_COLUMNS)], ignore_index=True)
     data.to_csv(csv_path, index=False, encoding="utf-8-sig")
@@ -467,7 +569,12 @@ def update_candidate_pool_fields(csv_path: Path, candidate_id: str = "", appid: 
         raise ValueError("未找到候选记录。")
     for column, value in updates.items():
         if column in data.columns:
-            data.loc[mask, column] = str(value)
+            if column == "stage":
+                data.loc[mask, column] = normalize_candidate_stage(value)
+            elif column == "priority":
+                data.loc[mask, column] = normalize_candidate_priority(value)
+            else:
+                data.loc[mask, column] = str(value)
     data.loc[mask, "updated_at"] = _now_text()
     data.to_csv(csv_path, index=False, encoding="utf-8-sig")
     return csv_path
@@ -483,13 +590,28 @@ def filter_candidate_pool(
 ) -> pd.DataFrame:
     filtered = data.copy()
     if stage != "全部":
-        filtered = filtered.loc[filtered["stage"].astype(str).str.strip().eq(stage)]
+        normalized_stage = filtered["stage"].map(normalize_candidate_stage)
+        filtered = filtered.loc[normalized_stage.eq(stage)]
     if priority != "全部":
-        filtered = filtered.loc[filtered["priority"].astype(str).str.strip().eq(priority)]
+        normalized_priority = filtered["priority"].map(normalize_candidate_priority)
+        filtered = filtered.loc[normalized_priority.eq(priority)]
     if has_demo != "全部":
-        filtered = filtered.loc[filtered["has_demo"].astype(str).str.strip().eq(has_demo)]
+        demo_values = filtered["has_demo"].fillna("").astype(str).str.strip().str.casefold()
+        if has_demo == "是":
+            filtered = filtered.loc[demo_values.isin({"是", "有", "true", "yes", "1"})]
+        elif has_demo == "否":
+            filtered = filtered.loc[demo_values.isin({"否", "无", "false", "no", "0"})]
+        else:
+            filtered = filtered.loc[demo_values.isin({"", "未确认", "待补"})]
     if supports_schinese != "全部":
-        filtered = filtered.loc[filtered["supports_schinese"].astype(str).str.strip().eq(supports_schinese)]
+        chinese_fields = filtered[["supports_schinese", "supports_tchinese", "supports_chinese"]].fillna("").astype(str)
+        if supports_schinese == "是":
+            mask = chinese_fields.apply(lambda row: any(value.strip().casefold() in {"是", "有", "true", "yes", "1"} for value in row), axis=1)
+        elif supports_schinese == "否":
+            mask = chinese_fields.apply(lambda row: bool([value for value in row if value.strip()]) and all(value.strip().casefold() in {"否", "无", "false", "no", "0"} for value in row if value.strip()), axis=1)
+        else:
+            mask = chinese_fields.apply(lambda row: not any(value.strip() and value.strip() not in {"未确认", "待补"} for value in row), axis=1)
+        filtered = filtered.loc[mask]
     if archived == "未归档":
         filtered = filtered.loc[~filtered["is_archived"].astype(str).str.casefold().isin({"true", "1", "yes", "y"})]
     elif archived == "已归档":
@@ -510,15 +632,16 @@ def candidate_pool_summary(data: pd.DataFrame) -> dict:
         }
     active = data.loc[~data["is_archived"].astype(str).str.casefold().isin({"true", "1", "yes", "y"})].copy()
     today_prefix = datetime.now().strftime("%Y-%m-%d")
-    pending_stages = {"新发现", "待补资料", "待社媒确认", "待开发商调查", "暂缓"}
+    normalized_stage = active["stage"].map(normalize_candidate_stage)
+    normalized_priority = active["priority"].map(normalize_candidate_priority)
     suggestions = apply_auto_suggestions(data)
     return {
         "today_new": int(data["created_at"].astype(str).str.startswith(today_prefix).sum()),
-        "pending": int(active["stage"].astype(str).isin(pending_stages).sum()),
-        "high_priority": int(active["priority"].astype(str).eq("高").sum()),
-        "demo": int(active["stage"].astype(str).eq("待试玩").sum()),
-        "contact": int(active["stage"].astype(str).eq("值得联系").sum()),
-        "rejected": int(data["stage"].astype(str).eq("放弃").sum()),
+        "pending": int(normalized_stage.isin({"待补资料", "待试玩", "待评估", "值得联系", "已联系", "暂缓"}).sum()),
+        "high_priority": int(normalized_priority.eq("高").sum()),
+        "demo": int(normalized_stage.eq("待试玩").sum()),
+        "contact": int(normalized_stage.eq("值得联系").sum()),
+        "rejected": int(data["stage"].map(normalize_candidate_stage).eq("放弃").sum()),
         "insufficient": int(suggestions["auto_suggestion"].astype(str).eq("资料不足").sum()) if "auto_suggestion" in suggestions.columns else 0,
     }
 
@@ -627,23 +750,54 @@ def apply_suggestion_to_stage(suggestion: str) -> dict:
     mapping = {
         "待补资料": {"stage": "待补资料", "priority": "未定", "next_action": "补项目画像"},
         "暂缓": {"stage": "暂缓", "priority": "低", "next_action": "作为竞品参考"},
-        "竞品参考": {"stage": "待开发商调查", "priority": "低", "next_action": "查发行合作空间"},
+        "竞品参考": {"stage": "待评估", "priority": "低", "next_action": "查发行合作空间"},
         "值得联系": {"stage": "值得联系", "priority": "高", "next_action": "查联系方式 / 准备外联"},
         "待试玩": {"stage": "待试玩", "priority": "中", "next_action": "试玩 Demo"},
-        "待开发商调查": {"stage": "待开发商调查", "priority": "未定", "next_action": "查开发商背景"},
+        "待开发商调查": {"stage": "待评估", "priority": "未定", "next_action": "查开发商背景"},
         "资料不足": {"stage": "待补资料", "priority": "未定", "next_action": "补项目画像"},
         "观望": {"stage": "暂缓", "priority": "低", "next_action": "等待 Demo / 新资料"},
         "可优先查看": {"stage": "待试玩", "priority": "高", "next_action": "试玩 Demo / 补中文区反馈"},
-        "已有发行": {"stage": "待开发商调查", "priority": "低", "next_action": "确认发行商关系"},
+        "已有发行": {"stage": "待评估", "priority": "低", "next_action": "确认发行商关系"},
         "已上线项目": {"stage": "暂缓", "priority": "低", "next_action": "作为竞品参考"},
-        "人工复核": {"stage": "待补资料", "priority": "未定", "next_action": "人工复核"},
+        "人工复核": {"stage": "待评估", "priority": "未定", "next_action": "人工复核"},
     }
     return mapping.get(str(suggestion or "").strip(), mapping["人工复核"]).copy()
 
 
 def is_insufficient_candidate(row: dict) -> bool:
-    suggestion, _ = build_auto_suggestion(row)
-    return suggestion in {"待补资料", "资料不足"}
+    return candidate_material_status(row)["status"] == "缺资料"
+
+
+def _is_missing_material_value(value) -> bool:
+    text = str(value or "").strip()
+    return text in {"", "未获取", "未确认", "未填写", "资料不足", "待补", "暂无", "None", "nan", "[]"}
+
+
+def candidate_material_status(row: dict) -> dict:
+    appid = str(row.get("appid", "") or "").strip()
+    if not appid:
+        return {"status": "无 AppID", "missing_items": ["AppID"]}
+    source_notes = str(row.get("source_notes", "") or "")
+    if any(marker in source_notes for marker in ["Steam 访问失败", "请求失败", "获取失败", "补全失败"]):
+        return {"status": "请求失败", "missing_items": ["请求失败"]}
+    missing = []
+    checks = [
+        ("游戏名", row.get("game_name")),
+        ("开发商", row.get("developer")),
+        ("发行商", row.get("publisher")),
+        ("发售状态", row.get("release_status") or row.get("release_date")),
+        ("试玩", row.get("has_demo")),
+        ("评分", row.get("review_score") or row.get("positive_rate")),
+        ("评论数", row.get("review_count")),
+        ("头图", row.get("header_image") or row.get("image_url")),
+        ("内容类型", row.get("app_type")),
+    ]
+    chinese_value = row.get("supports_schinese") or row.get("supports_chinese") or row.get("supports_tchinese")
+    checks.append(("中文", chinese_value))
+    for label, value in checks:
+        if _is_missing_material_value(value):
+            missing.append(label)
+    return {"status": "缺资料" if missing else "完整", "missing_items": missing}
 
 
 def is_released_candidate(value: str) -> bool:
@@ -674,6 +828,15 @@ def candidate_pool_display_data(data: pd.DataFrame, show_full: bool = False) -> 
         base_columns = POOL_FULL_TABLE_COLUMNS if show_full else POOL_TABLE_COLUMNS
         return pd.DataFrame(columns=[CANDIDATE_POOL_FIELD_LABELS.get(column, column) for column in base_columns])
     suggested = apply_candidate_data_status(apply_auto_suggestions(data))
+    if "stage" in suggested.columns:
+        suggested["stage"] = suggested["stage"].map(normalize_candidate_stage)
+    if "priority" in suggested.columns:
+        suggested["priority"] = suggested["priority"].map(normalize_candidate_priority)
+    if "next_action" in suggested.columns:
+        suggested["next_action"] = [
+            normalize_next_action_for_stage(row.get("stage"), row.get("next_action"))
+            for _, row in suggested.iterrows()
+        ]
     base_columns = POOL_FULL_TABLE_COLUMNS if show_full else POOL_TABLE_COLUMNS
     columns = [column for column in base_columns if column in suggested.columns]
     display = suggested.loc[:, columns].copy()
@@ -717,6 +880,11 @@ def apply_candidate_data_status(data: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_candidate_data_status(row: dict) -> dict:
+    material = candidate_material_status(row)
+    if material["status"] == "无 AppID":
+        return {"data_completeness": "无 AppID", "missing_items": "AppID"}
+    if material["status"] == "请求失败":
+        return {"data_completeness": "请求失败", "missing_items": "请求失败"}
     missing = []
     if is_appid_placeholder_record(row):
         missing.extend(["基础信息", "开发商/发行商", "发售状态"])
@@ -789,8 +957,8 @@ def candidate_pool_options(data: pd.DataFrame) -> list[dict]:
     for _, row in data.iterrows():
         name = str(row.get("game_name", "") or "").strip() or "未命名候选"
         appid = str(row.get("appid", "") or "").strip() or "无 AppID"
-        stage = str(row.get("stage", "") or "新发现").strip()
-        priority = str(row.get("priority", "") or "未定").strip()
+        stage = normalize_candidate_stage(row.get("stage"))
+        priority = normalize_candidate_priority(row.get("priority"))
         candidate_id = str(row.get("candidate_id", "") or "").strip()
         label = f"{name} | {appid} | {stage} | {priority}"
         options.append({"label": label, "candidate_id": candidate_id, "row": row})
@@ -1061,7 +1229,7 @@ def _v070_daily_report_readable(frame: pd.DataFrame) -> pd.DataFrame:
             "release_status": "发售状态",
             "has_demo": "Demo",
             "supports_schinese": "简中",
-            "auto_suggestion": "自动建议",
+            "auto_suggestion": "本地建议",
             "next_action": "下一步动作",
             "missing_items": "缺失项",
             "owner_note": "备注",
@@ -1111,14 +1279,14 @@ def export_daily_candidate_report(csv_path: Path, export_dir: Path, market_data_
     today_prefix = datetime.now().strftime("%Y-%m-%d")
     export_path = export_dir / f"daily_candidate_report_{today_text}.xlsx"
 
-    stage = data["stage"].astype(str) if "stage" in data.columns else pd.Series([], dtype=str)
-    priority = data["priority"].astype(str) if "priority" in data.columns else pd.Series([], dtype=str)
+    stage = data["stage"].map(normalize_candidate_stage) if "stage" in data.columns else pd.Series([], dtype=str)
+    priority = data["priority"].map(normalize_candidate_priority) if "priority" in data.columns else pd.Series([], dtype=str)
     has_demo = data["has_demo"].astype(str) if "has_demo" in data.columns else pd.Series([], dtype=str)
     created_at = data["created_at"].astype(str) if "created_at" in data.columns else pd.Series([], dtype=str)
 
     sheets = {
         "今日新增": data.loc[created_at.str.startswith(today_prefix)] if not data.empty else data,
-        "待处理": data.loc[stage.isin(["新发现", "待补资料", "待开发商调查"])] if not data.empty else data,
+        "待处理": data.loc[stage.isin(["待补资料", "待试玩", "待评估", "值得联系", "已联系", "暂缓"])] if not data.empty else data,
         "待试玩": data.loc[stage.eq("待试玩") | has_demo.eq("是")] if not data.empty else data,
         "值得联系": data.loc[stage.eq("值得联系") | priority.eq("高")] if not data.empty else data,
         "放弃_暂缓": data.loc[stage.isin(["放弃", "暂缓"])] if not data.empty else data,
