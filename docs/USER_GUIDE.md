@@ -21,9 +21,15 @@ python -m streamlit run app.py --server.port 8501
 3. 查看基础信息、Steam 入口和可用字段。
 4. 需要继续处理时，可发送到项目画像或候选池相关流程。
 
-## 如何用 Steam 浏览器采集
+## 如何用项目导入
 
-1. 打开“Steam 浏览器采集”。
+1. 打开顶部导航的“项目导入”。
+2. 在“导入方式”中选择 Steam 搜索导入、Steam 页面采集或 SteamDB 粘贴导入。
+3. 默认推荐使用“Steam 搜索导入”。
+
+## 如何用 Steam 页面采集
+
+1. 打开“项目导入”，选择“Steam 页面采集”。
 2. 点击“打开 Steam 浏览器”。
 3. 在打开的浏览器里访问 Steam 首页、搜索页、Coming Soon、活动页等页面。
 4. 回到工具页点击“抓取当前页 AppID”。
@@ -32,9 +38,9 @@ python -m streamlit run app.py --server.port 8501
 7. 采集记录较多时，页面默认只展示前 100 条，可点击“显示更多 100 条”或展开完整调试表。
 8. “清空本次采集”只清空 `data/steam_browser_collected.csv`，不影响候选池；清空前会自动备份。
 
-## 如何用 Steam 搜索批量导入
+## 如何用 Steam 搜索导入
 
-1. 打开“Steam 搜索批量导入”。
+1. 打开“项目导入”，选择“Steam 搜索导入”。
 2. 选择 Coming Soon 游戏、Demo 池或自定义 Steam 搜索 URL。
 3. 保持默认保守数量，或按需要选择更高数量。
 4. 点击抓取后查看导入表。
@@ -43,9 +49,9 @@ python -m streamlit run app.py --server.port 8501
 7. “清空本次导入”只清空 `data/steam_search_imports.csv`，不影响候选池；清空前会自动备份。
 8. “按 AppID 去重”默认保留最新一条，并显示 before / after / removed。
 
-## 如何用 SteamDB 手动导入
+## 如何用 SteamDB 粘贴导入
 
-1. 打开“SteamDB 导入”。
+1. 打开“项目导入”，选择“SteamDB 粘贴导入”。
 2. 从 SteamDB 榜单或 App 页面复制文本、链接或 AppID。
 3. 粘贴到输入框并解析。
 4. 检查解析结果。
@@ -54,7 +60,7 @@ python -m streamlit run app.py --server.port 8501
 
 ## 如何补全基础信息
 
-在 Steam 浏览器采集、Steam 搜索批量导入或 SteamDB 导入页面中，使用现有“补全基础信息”入口。工具会基于 AppID 查询 Steam 公开基础信息，并写入开发商、发行商、发售状态、Demo、简中、类型、评论等字段。
+在“项目导入”页的 Steam 页面采集、Steam 搜索导入或 SteamDB 粘贴导入模式中，使用现有“补全基础信息”入口。工具会基于 AppID 查询 Steam 公开基础信息，并写入开发商、发行商、发售状态、Demo、简中、类型、评论等字段。
 
 ## 如何发送候选池
 
@@ -71,7 +77,7 @@ python -m streamlit run app.py --server.port 8501
 
 ### Playwright 浏览器打不开怎么办
 
-先确认依赖已安装，并重新启动工具。如果仍打不开，使用查查、Steam 搜索批量导入或 SteamDB 手动导入作为替代路径。
+先确认依赖已安装，并重新启动工具。如果仍打不开，使用查查、Steam 搜索导入或 SteamDB 粘贴导入作为替代路径。
 
 ### Steam Access Denied 怎么办
 
@@ -91,8 +97,8 @@ python -m streamlit run app.py --server.port 8501
 
 ### 如何清空采集表
 
-进入“Steam 浏览器采集”页面，使用页面内的清空入口。清空前请确认当前采集结果不再需要；该操作只清理采集表，不会修改候选池。
+进入“项目导入”页面，选择“Steam 页面采集”，使用页面内的清空入口。清空前请确认当前采集结果不再需要；该操作只清理采集表，不会修改候选池。
 
 ### 如何清空 Steam 搜索导入表
 
-进入“Steam 搜索批量导入”页面，勾选“我确认清空本次导入”后点击“清空本次导入”。该操作只清空当前导入列表，不会修改候选池。
+进入“项目导入”页面，选择“Steam 搜索导入”，勾选“我确认清空本次导入”后点击“清空本次导入”。该操作只清空当前导入列表，不会修改候选池。

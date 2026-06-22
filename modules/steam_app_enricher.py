@@ -71,8 +71,13 @@ def _basic_result_from_appdetails(appid: str, detail: dict, *, cache_hit: bool, 
         "price": _clean(detail.get("price")),
         "review_score": "",
         "review_count": "",
+        "positive_rate": "",
+        "review_score_desc": "",
+        "app_type": _clean(detail.get("app_type") or detail.get("type")),
         "has_demo": _clean(detail.get("has_demo")),
         "supports_schinese": _clean(detail.get("supports_schinese")),
+        "supports_tchinese": _clean(detail.get("supports_tchinese")) or _detect_traditional_chinese(detail.get("supported_languages")),
+        "supported_languages": _clean(detail.get("supported_languages")),
         "genres_tags": _clean(detail.get("genres_text")) or _join_list(detail.get("genres")),
         "short_desc": _clean(detail.get("short_description")),
         "header_image": _clean(detail.get("header_image")),
@@ -101,8 +106,13 @@ def _failed_result(appid: str, error: str, cache_warning: str = "") -> dict:
         "price": "",
         "review_score": "",
         "review_count": "",
+        "positive_rate": "",
+        "review_score_desc": "",
+        "app_type": "",
         "has_demo": "",
         "supports_schinese": "",
+        "supports_tchinese": "",
+        "supported_languages": "",
         "genres_tags": "",
         "short_desc": "",
         "header_image": "",
@@ -154,3 +164,13 @@ def _clean(value) -> str:
     if text in EMPTY_VALUES:
         return ""
     return text
+
+
+def _detect_traditional_chinese(value) -> str:
+    text = str(value or "")
+    folded = text.casefold()
+    if "繁体中文" in text or "traditional chinese" in folded:
+        return "是"
+    if text.strip():
+        return "否"
+    return "未确认"
