@@ -1,5 +1,17 @@
 # NEXT_STEPS
 
+## V0.9.0-portfolio-package 验收
+
+1. 首页保持现有工作台结构和模块顺序。
+2. 首页项目发现 Feed、数据概览和快捷入口仍然存在。
+3. README 可作为作品集页面独立阅读，并包含项目定位、问题、工作流、功能、技术栈、限制和后续方向。
+4. `docs/portfolio/README.md` 列出六张截图占位、展示内容和脱敏要求。
+5. 文档状态说明包含作品集定位和简历描述。
+6. `python -m py_compile app.py` 通过。
+7. `git status` 不包含 `data/cache`、`exports`、`reports`、`debug` 真实数据。
+
+后续只补充 Demo 数据、在线演示和展示截图，不在本版本扩展候选池、导入或项目画像功能。
+
 ## V0.8.5-P8-history-export-cleanup 验收
 
 1. 顶部导航不再出现“历史与导出”。

@@ -13477,6 +13477,16 @@ def render_docs_status_page() -> None:
 - 说明文档：`README.md`、`CHANGELOG.md`、`docs/PROJECT_STATUS.md`、`docs/NEXT_STEPS.md`
 """
     )
+    with st.expander("作品集展示说明", expanded=False):
+        st.markdown(
+            """
+- **项目定位**：面向独立游戏发行选品场景的内部效率工具。
+- **核心工作流**：项目发现 Feed → 项目导入 → 候选池管理 → 基础资料补全 → 一键项目画像 → 报告导出。
+- **技术栈**：Python / Streamlit / Pandas / Playwright / CSV 本地数据流 / Steam 页面数据解析。
+- **当前限制**：不是完整 SaaS；部分 Steam 数据依赖网络和页面结构；本地建议不是 AI 判断；SteamDB 当前为粘贴解析。
+- **适合放入简历的描述**：使用 Python、Streamlit、Pandas 与 Playwright 搭建独立游戏发行选品工作台，将项目发现、资料补全、候选池筛选、单项目画像和报告导出整理为可复用工作流。
+"""
+        )
     with st.expander("开发者信息 / 缓存与调试路径", expanded=False):
         st.markdown(
             """
