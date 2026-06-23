@@ -1,5 +1,16 @@
 # PROJECT_STATUS
 
+## 当前已完成 V0.9.1-install-feed-source-fix
+
+- 修正首页项目发现 Feed 默认来源：Steam 页面采集、候选池 / 导入候选记录、手动观察、Steam 图文源。
+- `appdetails cache` 只作为“缓存参考 / 最近查询过的项目”展示，不默认进入首页发现流。
+- 首页主按钮改为“重新读取本地数据”，并明确说明不会强制抓取 Steam 最新项目。
+- 首页增加页面读取时间和卡片采集 / 入池 / 图文源读取时间说明，减少“刷新后日期没变”的误解。
+- 高级刷新 / 缓存维护区增加 Steam 图文源强制刷新、首页图文源缓存清理、appdetails 缓存参考清理和首页展示状态清理。
+- Steam 页面采集自动安装 Playwright / Chromium 时增加耗时说明、执行命令、阶段状态和输出展示。
+- `安装采集环境.bat` 改为不依赖 `.venv`，安装日志写入 `logs/install_playwright.log`。
+- 未改动候选池数据结构、Steam 搜索导入、SteamDB 粘贴导入和一键项目画像核心逻辑。
+
 ## 当前已完成 V0.9.0-portfolio-package
 
 - 保留首页工作台结构、项目发现 Feed、数据概览和快捷入口。

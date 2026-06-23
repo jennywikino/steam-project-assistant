@@ -1,5 +1,18 @@
 # NEXT_STEPS
 
+## V0.9.1-install-feed-source-fix 验收
+
+1. 首页默认不再因为 `appdetails cache` 显示 PUBG、NBA 2K26 等最近查过的大游戏。
+2. 首页主按钮显示为“重新读取本地数据”。
+3. 首页项目发现 Feed 附近有默认数据来源说明。
+4. 首页显示页面读取时间，并说明卡片时间来自采集 / 入池 / 图文源读取时间。
+5. 高级刷新里有“强制刷新 Steam 图文源”。
+6. 高级缓存维护里可以清理首页图文源缓存、appdetails 缓存参考和首页展示状态。
+7. 点击 Steam 页面采集的自动安装入口时，有 5–15 分钟耗时说明、执行命令、阶段状态和安装输出。
+8. `安装采集环境.bat` 不依赖 `.venv`，结束后不会一闪而过，日志写入 `logs/install_playwright.log`。
+9. 竞品与候选、一键项目画像、项目导入仍能正常进入。
+10. `git status` 不包含 `data/cache`、`exports`、`reports`、`debug` 真实数据。
+
 ## V0.9.0-portfolio-package 验收
 
 1. 首页保持现有工作台结构和模块顺序。
