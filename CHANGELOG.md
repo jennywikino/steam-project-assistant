@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## V0.9.1-P2-release-script-encoding-hotfix
+
+- Rewrote Windows batch scripts with ASCII-only content.
+- Fixed garbled Chinese output and broken command parsing in CMD.
+- Updated Playwright setup script to avoid `.venv` and hard-coded paths.
+- Added logs for dependency and Playwright setup.
+- Updated external setup documentation.
+
 ## V0.9.1-install-feed-source-fix
 
 - 首页项目发现 Feed 默认不再合并 `appdetails cache`，避免“查查 / 项目画像 / 补资料”产生的大游戏缓存污染发现流。

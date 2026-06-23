@@ -1,5 +1,13 @@
 # PROJECT_STATUS
 
+## 当前已完成 V0.9.1-P2-release-script-encoding-hotfix
+
+- Windows `.bat` scripts now use ASCII-only content to avoid CMD code page issues on external machines.
+- `安装采集环境.bat` no longer depends on `.venv` or hard-coded local paths.
+- `安装依赖.bat` was added for Release zip first-time setup and writes `logs\install_deps.log`.
+- Playwright / Chromium setup writes `logs\install_playwright.log` and keeps the console open with `pause`.
+- README and SETUP now recommend `.bat` scripts as the first-time setup path and keep VBS optional.
+
 ## 当前已完成 V0.9.1-install-feed-source-fix
 
 - 修正首页项目发现 Feed 默认来源：Steam 页面采集、候选池 / 导入候选记录、手动观察、Steam 图文源。

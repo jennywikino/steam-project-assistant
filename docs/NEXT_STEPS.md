@@ -1,5 +1,16 @@
 # NEXT_STEPS
 
+## V0.9.1-P2-release-script-encoding-hotfix 验收
+
+1. All `.bat` files contain ASCII-only content.
+2. `安装采集环境.bat` does not contain `.venv`, hard-coded local paths, Chinese echo text, or Chinese comments.
+3. `安装采集环境.bat` shows English setup stages and writes `logs\install_playwright.log`.
+4. `安装依赖.bat` uses `py -3` first, falls back to `python`, and writes `logs\install_deps.log`.
+5. `启动工具.bat` uses `cd /d "%~dp0"` and does not use a hard-coded path.
+6. README / SETUP do not recommend VBS as the first-time entry.
+7. `python -m py_compile app.py` or equivalent passes.
+8. `git status` does not include `data/cache`, `exports`, `reports`, `debug`, or `logs`.
+
 ## V0.9.1-install-feed-source-fix 验收
 
 1. 首页默认不再因为 `appdetails cache` 显示 PUBG、NBA 2K26 等最近查过的大游戏。

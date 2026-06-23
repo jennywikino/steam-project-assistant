@@ -1,5 +1,25 @@
 # 安装说明
 
+## Windows Release first-time setup
+
+Recommended order after downloading the GitHub Release zip:
+
+1. Unzip the release package.
+2. Double-click `安装依赖.bat`.
+3. Double-click `启动工具.bat`.
+4. If you need Steam page collection, double-click `安装采集环境.bat`.
+
+Windows may show an unknown publisher warning for `.bat` or `.vbs` files. Use the scripts from the official GitHub Release only.
+
+The VBS launcher is optional and not recommended for first-time setup because it hides the console window and can make failures harder to see.
+
+## Script logs
+
+- Dependency setup: `logs\install_deps.log`
+- Playwright / Chromium setup: `logs\install_playwright.log`
+
+Playwright / Chromium setup may take 5-15 minutes depending on your network.
+
 ## 基础启动
 
 安装 Python 依赖后，在项目根目录启动 Streamlit 应用。
