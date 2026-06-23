@@ -5,6 +5,7 @@ from io import BytesIO
 import importlib.metadata
 import importlib.util
 import json
+import os
 import re
 import subprocess
 import sys
@@ -284,6 +285,7 @@ NEW_STORE_EVENTS_CSV_PATH = BASE_DIR / "data" / "new_store_events.csv"
 STEAM_BROWSER_COLLECTED_CSV_PATH = BASE_DIR / "data" / "steam_browser_collected.csv"
 STEAM_SEARCH_IMPORT_CSV_PATH = BASE_DIR / "data" / "steam_search_imports.csv"
 STEAM_BROWSER_USER_DATA_DIR = BASE_DIR / "data" / "browser_profiles" / "steam_browser_collector"
+PLAYWRIGHT_BROWSERS_DIR = (BASE_DIR / "ms-playwright") if BASE_DIR.name.lower() == "app" else (BASE_DIR / "app" / "ms-playwright")
 STEAM_BROWSER_DEBUG_PORT = 9222
 DAILY_WATCH_CSV_PATH = BASE_DIR / "data" / "daily_watch_notes.csv"
 HOME_SNAPSHOT_CSV_PATH = BASE_DIR / "data" / "home_snapshots.csv"
@@ -7380,7 +7382,7 @@ def render_home_chacha_lookup() -> None:
             "Steam 链接 / SteamDB 链接 / AppID / 游戏名 / 混合文本",
             key="home_direct_lookup_input",
             height=88,
-            placeholder="https://store.steampowered.com/app/3513350/Wuthering_Waves/\n或 Wuthering Waves / 3513350",
+            placeholder="粘贴 Steam 链接 / SteamDB 链接 / AppID / 游戏名，例如：https://store.steampowered.com/app/xxxxx/",
         )
     with submit_col:
         st.write("")
@@ -7998,7 +8000,7 @@ def render_chacha_search_candidates() -> None:
 
     if not main_candidates:
         st.warning("未找到高相关 Steam 候选。建议粘贴 Steam 链接或 AppID。")
-        st.code("https://store.steampowered.com/app/3513350/Wuthering_Waves/\nAppID: 3513350", language="text")
+        st.code("https://store.steampowered.com/app/xxxxx/\nAppID: xxxxx", language="text")
     else:
         for index, candidate in enumerate(main_candidates, start=1):
             render_chacha_candidate_card(candidate, f"main_{index}")
@@ -12406,17 +12408,32 @@ def render_steamdb_import_section() -> None:
 
 STEAM_BROWSER_INSTALL_COMMANDS = (
     "python -m pip install playwright\n"
+    "set PLAYWRIGHT_BROWSERS_PATH=app\\ms-playwright\n"
     "python -m playwright install chromium"
 )
+PLAYWRIGHT_BROWSERS_DISPLAY_PATH = "app/ms-playwright"
+STEAM_BROWSER_LIVE_HANDLES: list[tuple[object, object]] = []
+
+
+def ensure_playwright_browsers_path() -> Path:
+    PLAYWRIGHT_BROWSERS_DIR.mkdir(parents=True, exist_ok=True)
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(PLAYWRIGHT_BROWSERS_DIR)
+    return PLAYWRIGHT_BROWSERS_DIR
 
 
 def check_playwright_environment() -> dict:
+    browsers_dir = ensure_playwright_browsers_path()
     result = {
         "ok": False,
         "python_executable": sys.executable,
+        "browsers_path": str(browsers_dir),
+        "browsers_display_path": PLAYWRIGHT_BROWSERS_DISPLAY_PATH,
         "playwright_installed": False,
         "playwright_version": "",
+        "edge_launch_ok": False,
+        "edge_error": "",
         "chromium_launch_ok": False,
+        "chromium_error": "",
         "error": "",
     }
     if importlib.util.find_spec("playwright") is None:
@@ -12427,21 +12444,98 @@ def check_playwright_environment() -> dict:
         result["playwright_version"] = importlib.metadata.version("playwright")
     except importlib.metadata.PackageNotFoundError:
         result["playwright_version"] = "未知"
+    result["edge_launch_ok"], result["edge_error"] = probe_playwright_chromium_launch(channel="msedge")
+    result["chromium_launch_ok"], result["chromium_error"] = probe_playwright_chromium_launch()
+    result["ok"] = bool(result["edge_launch_ok"] or result["chromium_launch_ok"])
+    if not result["ok"]:
+        result["error"] = result["edge_error"] or result["chromium_error"]
+    return result
+
+
+def probe_playwright_chromium_launch(channel: str | None = None) -> tuple[bool, str]:
     try:
         from playwright.sync_api import sync_playwright
 
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=True)
+            launch_kwargs = {"headless": True}
+            if channel:
+                launch_kwargs["channel"] = channel
+            browser = playwright.chromium.launch(**launch_kwargs)
             browser.close()
-        result["chromium_launch_ok"] = True
-        result["ok"] = True
+        return True, ""
     except Exception as exc:
-        result["error"] = str(exc)
-    return result
+        return False, str(exc)
+
+
+def launch_steam_browser_with_playwright(user_data_dir: Path, start_url: str = DEFAULT_STEAM_URL, debug_port: int = STEAM_BROWSER_DEBUG_PORT) -> dict:
+    ensure_playwright_browsers_path()
+    if importlib.util.find_spec("playwright") is None:
+        return {
+            "success": False,
+            "message": "当前 Python 环境未安装 Playwright。请先安装运行依赖，或运行可选 Chromium 安装脚本。",
+            "browser_running": False,
+            "debug_port": debug_port,
+        }
+    if browser_is_open(debug_port):
+        return {
+            "success": True,
+            "message": "Steam 浏览器已打开。",
+            "browser_running": True,
+            "debug_port": debug_port,
+        }
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as exc:
+        return {
+            "success": False,
+            "message": f"Playwright 启动失败：{exc}",
+            "browser_running": False,
+            "debug_port": debug_port,
+        }
+
+    user_data_dir.mkdir(parents=True, exist_ok=True)
+    launch_args = [
+        f"--remote-debugging-port={debug_port}",
+        f"--user-data-dir={user_data_dir}",
+        "--new-window",
+    ]
+    launch_attempts = [
+        ("本机 Microsoft Edge", {"channel": "msedge", "headless": False, "args": launch_args}),
+        ("Playwright Chromium", {"headless": False, "args": launch_args}),
+    ]
+    errors = []
+    for label, launch_kwargs in launch_attempts:
+        playwright = sync_playwright().start()
+        try:
+            browser = playwright.chromium.launch(**launch_kwargs)
+            page = browser.new_page()
+            page.goto(start_url, wait_until="domcontentloaded", timeout=30000)
+            STEAM_BROWSER_LIVE_HANDLES.append((playwright, browser))
+            return {
+                "success": True,
+                "message": f"Steam 浏览器已打开（{label}）。",
+                "browser_running": True,
+                "debug_port": debug_port,
+            }
+        except Exception as exc:
+            errors.append(f"{label}：{exc}")
+            try:
+                playwright.stop()
+            except Exception:
+                pass
+    return {
+        "success": False,
+        "message": "缺少可用浏览器环境。请安装 Microsoft Edge，或点击“可选安装 Playwright Chromium”。\n" + "\n".join(errors),
+        "browser_running": False,
+        "debug_port": debug_port,
+    }
 
 
 def install_steam_browser_environment(progress_callback=None) -> tuple[bool, str]:
     python_path = Path(sys.executable)
+    browsers_dir = ensure_playwright_browsers_path()
+    install_env = os.environ.copy()
+    install_env["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers_dir)
     commands = [
         ("正在安装 Playwright Python 包", [str(python_path), "-m", "pip", "install", "playwright"]),
         ("正在下载 Chromium 浏览器", [str(python_path), "-m", "playwright", "install", "chromium"]),
@@ -12460,6 +12554,7 @@ def install_steam_browser_environment(progress_callback=None) -> tuple[bool, str
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                env=install_env,
                 timeout=1800,
                 check=False,
             )
@@ -12482,9 +12577,54 @@ def render_playwright_environment_diagnostics(environment: dict) -> None:
         st.write(f"当前 Python：{environment.get('python_executable') or '未知'}")
         st.write(f"Playwright 包：{'已安装' if environment.get('playwright_installed') else '未安装'}")
         st.write(f"Playwright 版本：{environment.get('playwright_version') or '未获取'}")
-        st.write(f"Chromium 启动：{'成功' if environment.get('chromium_launch_ok') else '失败'}")
+        st.write(f"本机 Edge 启动：{'成功' if environment.get('edge_launch_ok') else '失败'}")
+        st.write(f"Playwright Chromium 启动：{'成功' if environment.get('chromium_launch_ok') else '失败'}")
+        st.write(f"当前 Playwright Chromium 目录：{environment.get('browsers_display_path') or PLAYWRIGHT_BROWSERS_DISPLAY_PATH}")
         if environment.get("error"):
             st.code(str(environment.get("error")), language="text")
+        elif environment.get("edge_error") and not environment.get("edge_launch_ok"):
+            st.code(str(environment.get("edge_error")), language="text")
+        elif environment.get("chromium_error") and not environment.get("chromium_launch_ok"):
+            st.code(str(environment.get("chromium_error")), language="text")
+
+
+def render_optional_playwright_chromium_install(key_suffix: str) -> None:
+    st.info(
+        "本工具会优先使用本机 Microsoft Edge。只有 Edge 不可用，或你希望完全便携时，才需要安装 Playwright Chromium。"
+        "下载体积较大，可能较慢。"
+    )
+    if st.button("可选安装 Playwright Chromium", key=f"steam_browser_install_environment_{key_suffix}", use_container_width=True):
+        st.caption(f"Chromium 将安装到当前工具包内：{ensure_playwright_browsers_path()}")
+        st.caption("当前将执行以下命令：")
+        st.code(STEAM_BROWSER_INSTALL_COMMANDS, language="powershell")
+        stage_box = st.empty()
+        command_box = st.empty()
+
+        def update_install_stage(stage_label: str, command_text: str) -> None:
+            stage_box.info(stage_label)
+            command_box.code(command_text, language="powershell")
+
+        with st.spinner("安装进行中，请不要关闭工具……"):
+            success, output = install_steam_browser_environment(update_install_stage)
+        if success:
+            stage_box.success("安装完成")
+            environment = check_playwright_environment()
+            if environment.get("ok"):
+                st.success("采集环境已可用，请刷新页面或重新进入 Steam 页面采集。")
+            else:
+                st.error("安装命令已完成，但当前 Python 仍无法启动 Edge 或 Chromium。请查看环境诊断。")
+            if output:
+                with st.expander("查看安装输出", expanded=False):
+                    st.code(output[-12000:], language="text")
+        else:
+            stage_box.error("安装失败")
+            st.error(
+                "可选安装失败。也可以关闭工具，在项目根目录双击“3_可选_安装Steam页面采集环境.bat”，或手动运行：\n\n"
+                "python -m pip install playwright\n"
+                "set PLAYWRIGHT_BROWSERS_PATH=app\\ms-playwright\n"
+                "python -m playwright install chromium"
+            )
+            st.code(output[-12000:] if output else "未获取到错误输出。", language="text")
 
 
 def render_steam_browser_collector_page() -> None:
@@ -12500,47 +12640,27 @@ def render_steam_browser_collector_page() -> None:
     )
 
     environment = check_playwright_environment()
+    if environment.get("edge_launch_ok"):
+        st.success(
+            "已检测到本机 Microsoft Edge，Steam 页面采集可用。\n\n"
+            "可选：如需完全便携，可再安装 Playwright Chromium 到 app/ms-playwright。"
+        )
+        with st.expander("可选安装 Playwright Chromium", expanded=False):
+            render_optional_playwright_chromium_install("optional")
+
     if not environment.get("ok"):
         st.error(
-            "**缺少 Steam 页面采集环境**\n\n"
-            "Steam 页面采集需要本地浏览器自动化环境。当前电脑还没有安装 Playwright / Chromium，所以页面采集暂不可用。\n\n"
+            "**缺少可用浏览器环境。**\n\n"
+            "你可以点击“可选安装 Playwright Chromium”，这一步会下载数百 MB，可能较慢。\n\n"
+            "本工具会优先使用本机 Microsoft Edge。只有 Edge 不可用，或你希望完全便携时，才需要安装 Playwright Chromium。\n\n"
             "你可以：\n"
-            "1. 点击下方“自动安装采集环境”\n"
-            "2. 或在项目根目录运行“安装采集环境.bat”\n"
+            "1. 点击下方“可选安装 Playwright Chromium”\n"
+            "2. 或在项目根目录运行“3_可选_安装Steam页面采集环境.bat”\n"
             "3. 安装完成后重启工具"
         )
         install_cols = st.columns(2)
-        if install_cols[0].button("自动安装采集环境", key="steam_browser_install_environment", use_container_width=True):
-            st.info("正在安装 Playwright 和 Chromium，可能需要 5–15 分钟，取决于网络环境。")
-            st.caption("当前将执行以下命令：")
-            st.code(STEAM_BROWSER_INSTALL_COMMANDS, language="powershell")
-            stage_box = st.empty()
-            command_box = st.empty()
-
-            def update_install_stage(stage_label: str, command_text: str) -> None:
-                stage_box.info(stage_label)
-                command_box.code(command_text, language="powershell")
-
-            with st.spinner("安装进行中，请不要关闭工具……"):
-                success, output = install_steam_browser_environment(update_install_stage)
-            if success:
-                stage_box.success("安装完成")
-                environment = check_playwright_environment()
-                if environment.get("ok"):
-                    st.success("采集环境已可用，请刷新页面或重新进入 Steam 页面采集。")
-                else:
-                    st.error("安装命令已完成，但当前 Python 仍无法启动 Chromium。请查看环境诊断。")
-                if output:
-                    with st.expander("查看安装输出", expanded=False):
-                        st.code(output[-12000:], language="text")
-            else:
-                stage_box.error("安装失败")
-                st.error(
-                    "自动安装失败。也可以关闭工具，在项目根目录双击“安装采集环境.bat”，或手动运行：\n\n"
-                    "python -m pip install playwright\n"
-                    "python -m playwright install chromium"
-                )
-                st.code(output[-12000:] if output else "未获取到错误输出。", language="text")
+        with install_cols[0]:
+            render_optional_playwright_chromium_install("missing")
         if install_cols[1].button("显示手动安装命令", key="steam_browser_show_install_commands_button", use_container_width=True):
             st.session_state["steam_browser_show_install_commands_visible"] = True
         if st.session_state.get("steam_browser_show_install_commands_visible"):
@@ -12552,7 +12672,7 @@ def render_steam_browser_collector_page() -> None:
     st.caption("打开列表页后抓取页面游戏；抓取成功会自动按 AppID 合并或更新，并进入本次采集表。")
     action_cols = st.columns(3)
     if action_cols[0].button("打开 Steam 浏览器", key="steam_browser_open", use_container_width=True):
-        result = launch_browser(STEAM_BROWSER_USER_DATA_DIR, DEFAULT_STEAM_URL)
+        result = launch_steam_browser_with_playwright(STEAM_BROWSER_USER_DATA_DIR, DEFAULT_STEAM_URL, STEAM_BROWSER_DEBUG_PORT)
         st.session_state["steam_browser_running"] = bool(result.get("browser_running"))
         st.session_state["steam_browser_debug_port"] = result.get("debug_port", STEAM_BROWSER_DEBUG_PORT)
         if result.get("success"):

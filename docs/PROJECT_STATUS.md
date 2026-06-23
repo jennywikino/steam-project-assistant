@@ -1,5 +1,21 @@
 # PROJECT_STATUS
 
+## 当前已完成 V0.9.2-P0a-portable-stop-script
+
+- Added `9_可选_强制停止工具.bat` to the portable package templates.
+- Portable build now copies the optional stop script to the package root.
+- Documentation explains that closing the browser tab may not stop Streamlit.
+- Normal shutdown is closing the startup terminal window or pressing Ctrl+C.
+- Core app logic was not changed.
+
+## 当前已完成 V0.9.2-P0-portable-release
+
+- Added `tools/build_portable_release.py` to build `dist/SteamProjectAssistant-v0.9.2-portable.zip`.
+- Added portable templates under `tools/portable_templates/`.
+- Portable package entry scripts call `runtime\python\python.exe` and do not depend on system Python, `py -3`, PATH, or `.venv`.
+- Portable package creates empty `app/data/README.md` and `app/logs/`, excluding real local caches and reports.
+- README / SETUP now recommend the portable zip for normal Windows users.
+
 ## 当前已完成 V0.9.1-P3d-root-entry-naming-hotfix
 
 - Root entry names were changed to `0_先看这里_启动说明.txt`, `1_首次使用_安装运行依赖.bat`, `2_启动工具.bat`, and `3_可选_安装Steam页面采集环境.bat`.

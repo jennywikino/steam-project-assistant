@@ -1,5 +1,28 @@
 # NEXT_STEPS
 
+## V0.9.2-P0a-portable-stop-script 验收
+
+1. Portable root contains `9_可选_强制停止工具.bat`.
+2. `9_可选_强制停止工具.bat` is ASCII-only and does not depend on Python.
+3. Stop script explains that it stops the process using port 8501.
+4. Stop script uses `netstat -ano` and `taskkill /PID <pid> /F`.
+5. README / SETUP / startup instructions explain Ctrl+C or closing the terminal as the normal shutdown path.
+6. README / SETUP / startup instructions explain that closing only the browser tab may not stop Streamlit.
+7. Core app logic is unchanged.
+8. `git status` does not include `dist`, `dist_test`, `tools/runtime`, `data/cache`, `exports`, `reports`, `debug`, or `logs`.
+
+## V0.9.2-P0-portable-release 验收
+
+1. `tools/build_portable_release.py` compiles with `python -m py_compile`.
+2. Build script expects `tools/runtime/python-embed-amd64.zip`.
+3. If embedded Python has no pip, build script expects `tools/runtime/get-pip.py`.
+4. Portable zip path is `dist/SteamProjectAssistant-v0.9.2-portable.zip`.
+5. Portable root contains only `0_先看这里_启动说明.txt`, `1_启动工具.bat`, `2_可选_安装Steam页面采集环境.bat`, `app/`, and `runtime/`.
+6. `1_启动工具.bat` calls `runtime\python\python.exe` and does not call system Python.
+7. `2_可选_安装Steam页面采集环境.bat` installs Chromium with portable Python and writes `app\logs\install_playwright.log`.
+8. Zip excludes real `data/cache`, `exports`, `reports`, `debug`, and `logs` data.
+9. README / SETUP recommend the portable zip for normal Windows users.
+
 ## V0.9.1-P3d-root-entry-naming-hotfix 验收
 
 1. Repository root shows `0_先看这里_启动说明.txt`, `1_首次使用_安装运行依赖.bat`, `2_启动工具.bat`, and `3_可选_安装Steam页面采集环境.bat`.

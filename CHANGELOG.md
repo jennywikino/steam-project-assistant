@@ -1,5 +1,20 @@
 # CHANGELOG
 
+## V0.9.2-P0a-portable-stop-script
+
+- Added optional stop script for the portable package.
+- Clarified that closing the browser tab does not necessarily stop the Streamlit process.
+- Documented Ctrl+C / close terminal as normal shutdown path.
+- Kept core app logic unchanged.
+
+## V0.9.2-P0-portable-release
+
+- Added portable release builder for `SteamProjectAssistant-v0.9.2-portable.zip`.
+- Added portable package templates for startup, Steam collector setup, and first-read instructions.
+- Portable startup script calls `runtime\python\python.exe` and does not depend on system Python.
+- Portable build excludes real `data/cache`, `exports`, `reports`, `debug`, and `logs` content.
+- Updated setup documentation to recommend the portable zip for normal Windows users.
+
 ## V0.9.1-P3d-root-entry-naming-hotfix
 
 - Renamed root user entry files with clear numeric Chinese names.
