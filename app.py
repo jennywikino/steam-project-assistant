@@ -6286,11 +6286,12 @@ def render_home_dashboard_page() -> None:
     if refresh_cols[1].button("打开候选池", key="home_go_candidate_pool", use_container_width=True):
         st.session_state["pending_home_target"] = "candidate_pool"
         home_toast("已定位到候选池。")
-    if refresh_cols[2].button("刷新首页", key="home_refresh_workbench", use_container_width=True):
+    if refresh_cols[2].button("重新读取本地数据", key="home_refresh_workbench", use_container_width=True):
         st.session_state["home_refresh_token"] = int(st.session_state.get("home_refresh_token", 0)) + 1
-        home_toast("首页已刷新。")
+        home_toast("已重新读取本地数据。")
         st.rerun()
-    refresh_cols[3].caption(f"最后读取时间：{loaded_at}")
+    refresh_cols[3].caption(f"页面读取时间：{loaded_at}")
+    st.caption("重新读取本地数据只会刷新本机 data/ 和 cache/ 中已有记录，不等于重新抓取 Steam 最新项目。项目卡片时间来自各项目的采集/入池时间。")
 
     if st.session_state.get("home_appdetails_clear_message"):
         st.success(st.session_state.pop("home_appdetails_clear_message"))
@@ -6303,6 +6304,7 @@ def render_home_dashboard_page() -> None:
     render_home_project_discovery_feed(candidate_pool, steam_feed, snapshots, daily_notes)
     render_home_recent_actions()
     render_home_advanced_refresh()
+    render_appdetails_cache_reference()
     render_home_low_frequency_links()
 
 
@@ -6374,11 +6376,13 @@ def render_home_recent_actions() -> None:
 
 def render_home_advanced_refresh() -> None:
     with st.expander("高级刷新 / 缓存维护", expanded=False):
+        st.caption("高级操作只处理首页展示缓存或 Steam 图文源缓存，不会删除 candidate_pool.csv 和 steam_browser_collected.csv。")
         cols = st.columns(4)
-        if cols[0].button("强制刷新图文源", key="home_force_refresh_feed", use_container_width=True):
+        if cols[0].button("强制刷新 Steam 图文源", key="home_force_refresh_feed", use_container_width=True):
             load_steam_store_home_feed(STEAM_HOME_FEED_CACHE_PATH, force_refresh=True)
-            home_toast("图文源已强制刷新。")
+            home_toast("Steam 图文源已强制刷新。")
             st.rerun()
+        cols[0].caption("会重新请求 Steam 图文源，可能受 Steam 网络影响。")
         if cols[1].button("强制刷新当前卡片详情", key="home_force_refresh_details", use_container_width=True):
             st.session_state["force_refresh_visible_appdetails"] = True
             home_toast("当前卡片详情将在下次渲染时强制刷新。")
@@ -6390,6 +6394,73 @@ def render_home_advanced_refresh() -> None:
         if cols[3].button("清理无效详情缓存", key="home_clear_invalid_details", use_container_width=True):
             removed_count = clear_invalid_appdetails_cache(STEAM_APPDETAILS_CACHE_PATH)
             st.success(f"已清理 {removed_count} 条无效 appdetails 缓存。")
+
+        st.divider()
+        cache_cols = st.columns(3)
+        if cache_cols[0].button("清理首页图文源缓存", key="home_clear_feed_cache", use_container_width=True):
+            removed = delete_file_if_exists(STEAM_HOME_FEED_CACHE_PATH)
+            st.success("已清理首页图文源缓存。" if removed else "首页图文源缓存不存在，无需清理。")
+        cache_cols[0].caption("仅删除 data/cache/steam_home_feed_cache.json。")
+        if cache_cols[1].button("清理 appdetails 缓存参考", key="home_clear_appdetails_cache", use_container_width=True):
+            removed = delete_file_if_exists(STEAM_APPDETAILS_CACHE_PATH)
+            st.warning("已清理 appdetails 缓存参考。不会删除候选池和采集记录。" if removed else "appdetails 缓存参考不存在，无需清理。")
+        cache_cols[1].caption("危险/高级：仅删除 data/cache/steam_appdetails_cache.json。")
+        if cache_cols[2].button("清理首页本地展示缓存", key="home_clear_session_cache", use_container_width=True):
+            cleared = clear_home_session_display_cache()
+            st.success(f"已清理 {cleared} 个首页展示状态。不会删除候选池和采集记录。")
+
+
+def delete_file_if_exists(path: Path) -> bool:
+    try:
+        if path.exists() and path.is_file():
+            path.unlink()
+            return True
+    except OSError as exc:
+        st.error(f"清理失败：{exc}")
+    return False
+
+
+def clear_home_session_display_cache() -> int:
+    exact_keys = {
+        "home_refresh_token",
+        "home_project_feed_visible_count",
+        "home_project_feed_previous_filter",
+        "home_project_feed_visible_count_by_filter",
+        "home_profile_sent_appids",
+        "home_pending_toast",
+        "home_appdetails_clear_message",
+        "force_refresh_visible_appdetails",
+        "force_refresh_visible_review_stats",
+        "steam_feed_last_force_refresh_at",
+    }
+    keys = [
+        key
+        for key in list(st.session_state.keys())
+        if key in exact_keys
+    ]
+    for key in keys:
+        st.session_state.pop(key, None)
+    return len(keys)
+
+
+def render_appdetails_cache_reference() -> None:
+    with st.expander("缓存参考 / 最近查询过的项目", expanded=False):
+        st.caption("这些项目来自本地基础信息缓存，不代表发行候选，不参与首页发现 Feed 默认筛选。")
+        cards = home_cards_from_appdetails_cache(limit=20)
+        if not cards:
+            st.info("暂无 appdetails 缓存参考。")
+            return
+        rows = []
+        for card in cards:
+            rows.append(
+                {
+                    "游戏名": home_card_display_name(card),
+                    "AppID": clean_candidate_value(card.get("appid")),
+                    "来源": "Steam 基础信息缓存",
+                    "最近查询时间": compact_card_value(card.get("feed_updated_at")),
+                }
+            )
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
 def render_home_low_frequency_links() -> None:
@@ -6441,6 +6512,7 @@ def render_home_project_discovery_feed(
     daily_notes: pd.DataFrame,
 ) -> None:
     st.subheader("项目发现 Feed")
+    st.caption("当前 Feed 默认来自：Steam 页面采集、候选池、手动观察、Steam 图文源。“查查 / 项目画像”产生的 appdetails cache 不会默认进入发现流。")
     feed_filter = st.radio("Feed 筛选", HOME_FEED_FILTER_OPTIONS, horizontal=True, key="home_project_feed_filter")
     previous_filter = st.session_state.get("home_project_feed_previous_filter")
     if previous_filter != feed_filter:
@@ -6476,10 +6548,8 @@ def build_home_project_feed_cards(
     cards: list[dict] = []
     cards.extend(home_cards_from_browser_collected())
     cards.extend(home_cards_from_candidate_pool(candidate_pool))
-    cards.extend(home_cards_from_appdetails_cache(limit=80))
-    if len(cards) < 12:
-        cards.extend(collect_steam_store_cards(steam_feed))
-        cards.extend(collect_manual_observation_cards(snapshots, daily_notes))
+    cards.extend(collect_manual_observation_cards(snapshots, daily_notes))
+    cards.extend(collect_steam_store_cards(steam_feed))
     hidden_appids = ignored_candidate_appids_for_home()
     if hidden_appids:
         cards = [card for card in cards if clean_candidate_value(card.get("appid")) not in hidden_appids]
@@ -6504,8 +6574,8 @@ def home_cards_from_browser_collected() -> list[dict]:
                 "title": clean_candidate_value(row_dict.get("game_name")) or f"AppID {appid}",
                 "game_name": clean_candidate_value(row_dict.get("game_name")) or f"AppID {appid}",
                 "appid": appid,
-                "source": "Steam 浏览器采集",
-                "source_group": "Steam 浏览器采集",
+                "source": "Steam 页面采集",
+                "source_group": "Steam 页面采集",
                 "source_url": clean_candidate_value(row_dict.get("source_page_url")) or steam_url_from_appid(appid),
                 "steam_url": clean_candidate_value(row_dict.get("steam_url")) or steam_url_from_appid(appid),
                 "steamdb_url": steamdb_app_url_from_appid(appid),
@@ -6656,7 +6726,7 @@ def home_feed_card_matches_filter(card: dict, feed_filter: str) -> bool:
     if feed_filter == "即将推出":
         return any(token in release_text for token in ["coming soon", "tba", "即将", "未发售", "待定"])
     if feed_filter == "近期上新":
-        return "Steam 浏览器采集" in source or "新" in release_text or "recent" in release_text
+        return "Steam 页面采集" in source or "Steam 浏览器采集" in source or "新" in release_text or "recent" in release_text
     if feed_filter == "待试玩":
         return "待试玩" in suggestion or "试玩" in next_action or str(card.get("has_demo", "") or "") == "是"
     if feed_filter == "值得联系":
@@ -6861,7 +6931,10 @@ def render_home_project_feed_card(card: dict, index: int, already_in_candidate_p
         if image_url:
             st.image(image_url, use_container_width=True)
         st.markdown(f"**{game_name}**")
-        st.caption(f"{card.get('source_group') or card.get('source') or '项目发现'} · AppID：{appid or '未获取'}")
+        st.caption(f"{home_feed_source_label(card)} · AppID：{appid or '未获取'}")
+        card_time = home_feed_card_time_label(card)
+        if card_time:
+            st.caption(card_time)
 
         tags = home_feed_card_tags(card)
         if tags:
@@ -6946,6 +7019,41 @@ def home_feed_card_tags(card: dict) -> list[str]:
     if home_feed_review_count(card) >= 500 or home_feed_has_hot_source(card):
         tags.append("热门参考")
     return tags[:7]
+
+
+def home_feed_source_label(card: dict) -> str:
+    raw = clean_candidate_value(card.get("source_group") or card.get("source"))
+    source_page = clean_candidate_value(card.get("source_page"))
+    source_text = f"{raw} {source_page}".strip().casefold()
+    if card.get("card_type") == "steam_browser_collected" or "browser" in source_text or "浏览器采集" in source_text:
+        return "Steam 页面采集"
+    if "steam search" in source_text or "steam 搜索" in source_text:
+        return "Steam 搜索导入"
+    if "steamdb" in source_text or "粘贴" in source_text:
+        return "SteamDB 粘贴导入"
+    if card.get("card_type") in {"daily_watch", "snapshot"} or "手动观察" in source_text or "首页快照" in source_text:
+        return "手动观察"
+    if card.get("card_type") == "steam_store" or clean_candidate_value(card.get("card_data_source")) == "feed_cache":
+        return "Steam 图文源"
+    if "候选池" in source_text or card.get("card_type") == "candidate_pool_feed":
+        return "候选池"
+    return raw or "项目发现"
+
+
+def home_feed_card_time_label(card: dict) -> str:
+    value = clean_candidate_value(
+        card.get("feed_updated_at")
+        or card.get("collected_at")
+        or card.get("created_at")
+        or card.get("feed_fetched_at")
+    )
+    if not value:
+        return ""
+    if card.get("card_type") == "steam_store":
+        return f"图文源读取时间：{value}"
+    if card.get("card_type") == "candidate_pool_feed":
+        return f"入池/更新时间：{value}"
+    return f"采集/记录时间：{value}"
 
 
 def home_feed_text_blob(card: dict) -> str:
@@ -7116,8 +7224,8 @@ def home_cards_from_browser_collected() -> list[dict]:
                 "title": clean_candidate_value(row_dict.get("game_name")) or f"AppID {appid}",
                 "game_name": clean_candidate_value(row_dict.get("game_name")) or f"AppID {appid}",
                 "appid": appid,
-                "source": "Steam 浏览器采集",
-                "source_group": "Steam 浏览器采集",
+                "source": "Steam 页面采集",
+                "source_group": "Steam 页面采集",
                 "source_url": clean_candidate_value(row_dict.get("source_page_url")) or steam_url_from_appid(appid),
                 "steam_url": clean_candidate_value(row_dict.get("steam_url")) or steam_url_from_appid(appid),
                 "steamdb_url": steamdb_app_url_from_appid(appid),
@@ -8826,6 +8934,7 @@ def collect_manual_observation_cards(snapshots: pd.DataFrame, daily_notes: pd.Da
                     "image_url": "",
                     "note": str(row.get("note", "")).strip(),
                     "next_action": str(row.get("next_action", "")).strip(),
+                    "feed_updated_at": str(row.get("created_at", "")).strip(),
                 }
             )
     return cards
@@ -9840,6 +9949,7 @@ def home_snapshot_row_to_card(row: pd.Series) -> dict:
         "image_url": str(row.get("image_url", "")).strip(),
         "note": str(row.get("note", "")).strip(),
         "next_action": str(row.get("next_action", "")).strip(),
+        "feed_updated_at": str(row.get("created_at", "")).strip(),
     }
 
 
@@ -9881,6 +9991,7 @@ def steam_store_item_to_card(item: SteamStoreFeedItem) -> dict:
         "source_filter": item.source_filter,
         "search_source_filter": item.source_filter,
         "feed_fetched_at": item.fetched_at,
+        "feed_updated_at": item.fetched_at,
         "feed_cache_status": "feed_cache",
         "source_url": item.steam_url,
         "steam_url": item.steam_url,
@@ -12294,8 +12405,8 @@ def render_steamdb_import_section() -> None:
 
 
 STEAM_BROWSER_INSTALL_COMMANDS = (
-    ".\\.venv\\Scripts\\python.exe -m pip install playwright\n"
-    ".\\.venv\\Scripts\\python.exe -m playwright install chromium"
+    "python -m pip install playwright\n"
+    "python -m playwright install chromium"
 )
 
 
@@ -12329,15 +12440,18 @@ def check_playwright_environment() -> dict:
     return result
 
 
-def install_steam_browser_environment() -> tuple[bool, str]:
+def install_steam_browser_environment(progress_callback=None) -> tuple[bool, str]:
     python_path = Path(sys.executable)
     commands = [
-        [str(python_path), "-m", "pip", "install", "playwright"],
-        [str(python_path), "-m", "playwright", "install", "chromium"],
+        ("正在安装 Playwright Python 包", [str(python_path), "-m", "pip", "install", "playwright"]),
+        ("正在下载 Chromium 浏览器", [str(python_path), "-m", "playwright", "install", "chromium"]),
     ]
     output: list[str] = []
-    for command in commands:
+    for stage_label, command in commands:
+        output.append(f"## {stage_label}")
         output.append("> " + " ".join(command))
+        if progress_callback:
+            progress_callback(stage_label, " ".join(command))
         try:
             result = subprocess.run(
                 command,
@@ -12359,6 +12473,7 @@ def install_steam_browser_environment() -> tuple[bool, str]:
         if result.returncode != 0:
             output.append(f"命令退出码：{result.returncode}")
             return False, "\n".join(output)
+        output.append(f"{stage_label}：完成")
     return True, "\n".join(output)
 
 
@@ -12396,9 +12511,20 @@ def render_steam_browser_collector_page() -> None:
         )
         install_cols = st.columns(2)
         if install_cols[0].button("自动安装采集环境", key="steam_browser_install_environment", use_container_width=True):
-            with st.spinner("正在安装 Playwright 和 Chromium，请稍候……"):
-                success, output = install_steam_browser_environment()
+            st.info("正在安装 Playwright 和 Chromium，可能需要 5–15 分钟，取决于网络环境。")
+            st.caption("当前将执行以下命令：")
+            st.code(STEAM_BROWSER_INSTALL_COMMANDS, language="powershell")
+            stage_box = st.empty()
+            command_box = st.empty()
+
+            def update_install_stage(stage_label: str, command_text: str) -> None:
+                stage_box.info(stage_label)
+                command_box.code(command_text, language="powershell")
+
+            with st.spinner("安装进行中，请不要关闭工具……"):
+                success, output = install_steam_browser_environment(update_install_stage)
             if success:
+                stage_box.success("安装完成")
                 environment = check_playwright_environment()
                 if environment.get("ok"):
                     st.success("采集环境已可用，请刷新页面或重新进入 Steam 页面采集。")
@@ -12408,7 +12534,12 @@ def render_steam_browser_collector_page() -> None:
                     with st.expander("查看安装输出", expanded=False):
                         st.code(output[-12000:], language="text")
             else:
-                st.error("自动安装失败。请查看错误输出，或运行项目根目录的“安装采集环境.bat”。")
+                stage_box.error("安装失败")
+                st.error(
+                    "自动安装失败。也可以关闭工具，在项目根目录双击“安装采集环境.bat”，或手动运行：\n\n"
+                    "python -m pip install playwright\n"
+                    "python -m playwright install chromium"
+                )
                 st.code(output[-12000:] if output else "未获取到错误输出。", language="text")
         if install_cols[1].button("显示手动安装命令", key="steam_browser_show_install_commands_button", use_container_width=True):
             st.session_state["steam_browser_show_install_commands_visible"] = True

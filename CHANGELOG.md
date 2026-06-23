@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## V0.9.1-install-feed-source-fix
+
+- 首页项目发现 Feed 默认不再合并 `appdetails cache`，避免“查查 / 项目画像 / 补资料”产生的大游戏缓存污染发现流。
+- 首页 Feed 默认来源明确为 Steam 页面采集、候选池 / 导入候选记录、手动观察和 Steam 图文源。
+- “刷新首页”改为“重新读取本地数据”，并说明该操作不等于重新抓取 Steam 最新项目。
+- 首页高级刷新中保留“强制刷新 Steam 图文源”，并新增首页图文源缓存、appdetails 缓存参考和首页展示状态的清理入口。
+- Steam 页面采集环境自动安装增加预计耗时、执行命令、阶段状态和完整输出。
+- `安装采集环境.bat` 不再依赖 `.venv`，优先使用 `py -3`，回退 `python`，并写入 `logs/install_playwright.log`。
+- README / SETUP 补充 Playwright / Chromium 安装耗时、首页 Feed 本地数据差异和刷新语义说明。
+
 ## V0.9.0-portfolio-package
 
 - 保留首页工作台结构和项目发现 Feed。
