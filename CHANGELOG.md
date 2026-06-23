@@ -1,5 +1,29 @@
 # CHANGELOG
 
+## V0.9.1-P3d-root-entry-naming-hotfix
+
+- Renamed root user entry files with clear numeric Chinese names.
+- Replaced ambiguous dependency and collector setup names with first-time and optional labels.
+- Removed duplicate old root entry names.
+- Updated startup documentation to point users to the 0 / 1 / 2 / 3 entry flow.
+
+## V0.9.1-P3c-root-entry-cleanup
+
+- Removed duplicate numbered launcher scripts from repository root.
+- Removed `START_HERE` folder.
+- Removed the VBS launcher from ordinary user entrypoints.
+- Moved debug, stop, and local validation scripts away from the root into developer tools.
+- Kept only three user-facing Chinese batch files in root.
+- Updated startup documentation to clarify first-time and daily usage.
+
+## V0.9.1-P3-release-entrypoint-cleanup
+
+- Added numbered ASCII startup scripts for external users.
+- Added `START_HERE` folder with first-time setup entrypoints.
+- Fixed and downgraded the VBS launcher that looked for `????.bat`.
+- Updated setup documentation to make the first-time flow clearer.
+- Kept core app logic unchanged.
+
 ## V0.9.1-P2-release-script-encoding-hotfix
 
 - Rewrote Windows batch scripts with ASCII-only content.

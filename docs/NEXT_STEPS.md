@@ -1,5 +1,36 @@
 # NEXT_STEPS
 
+## V0.9.1-P3d-root-entry-naming-hotfix 验收
+
+1. Repository root shows `0_先看这里_启动说明.txt`, `1_首次使用_安装运行依赖.bat`, `2_启动工具.bat`, and `3_可选_安装Steam页面采集环境.bat`.
+2. Repository root no longer shows `安装依赖.bat`, `启动工具.bat`, `安装采集环境.bat`, or `启动说明.txt`.
+3. The three batch files remain ASCII-only internally.
+4. The batch files do not use `.venv` or hard-coded local paths.
+5. `3_可选_安装Steam页面采集环境.bat` explains that Chromium setup may take 5-15 minutes.
+6. README / SETUP / startup instructions recommend only the 0 / 1 / 2 / 3 flow.
+7. `app.py` business logic is unchanged.
+8. `git status` does not include `data/cache`, `exports`, `reports`, `debug`, or `logs`.
+
+## V0.9.1-P3c-root-entry-cleanup 验收
+
+1. Repository root keeps only these normal user entrypoints: `安装依赖.bat`, `启动工具.bat`, `安装采集环境.bat`, and `启动说明.txt`.
+2. Repository root no longer contains `01_INSTALL_DEPENDENCIES.bat`, `02_START_TOOL.bat`, `03_INSTALL_STEAM_COLLECTOR.bat`, `START_HERE`, or `启动工具_无黑窗.vbs`.
+3. Debug, stop, and local validation scripts are not shown in the root; they are developer tools under `tools/dev_scripts/`.
+4. README / SETUP / `启动说明.txt` recommend only the three Chinese batch files for normal users.
+5. `app.py` business logic is unchanged.
+6. `git status` does not include `data/cache`, `exports`, `reports`, `debug`, or `logs`.
+
+## V0.9.1-P3-release-entrypoint-cleanup 验收
+
+1. Release zip root shows `01_INSTALL_DEPENDENCIES.bat`, `02_START_TOOL.bat`, and `03_INSTALL_STEAM_COLLECTOR.bat`.
+2. `START_HERE` exists and contains `README_FIRST.txt` plus matching 01 / 02 / 03 scripts.
+3. `02_START_TOOL.bat` starts the app, or shows a clear error and pauses if dependencies are missing.
+4. `03_INSTALL_STEAM_COLLECTOR.bat` does not use `.venv`, does not use hard-coded paths, and shows English output.
+5. `启动工具_无黑窗.vbs` no longer looks for `????.bat`; if it fails, it tells the user to run `02_START_TOOL.bat`.
+6. README / SETUP / `启动说明.txt` recommend the 01 / 02 / 03 flow.
+7. `app.py` business logic is unchanged.
+8. `git status` does not include `data/cache`, `exports`, `reports`, `debug`, or `logs`.
+
 ## V0.9.1-P2-release-script-encoding-hotfix 验收
 
 1. All `.bat` files contain ASCII-only content.

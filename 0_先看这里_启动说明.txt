@@ -1,0 +1,23 @@
+Steam 项目初筛助手 - 启动说明
+
+第一次使用：
+1. 双击【1_首次使用_安装运行依赖.bat】
+2. 双击【2_启动工具.bat】
+
+日常使用：
+- 只需要双击【2_启动工具.bat】
+
+如果要使用 Steam 页面采集：
+- 再双击【3_可选_安装Steam页面采集环境.bat】
+- 这一步会安装 Playwright / Chromium，可能需要 5-15 分钟
+
+不要点击：
+- docs / modules / templates / tools
+- app.py
+- data / logs / exports / reports
+这些是程序文件或运行数据，不是启动入口。
+
+如果启动失败：
+- 查看 logs 文件夹里的日志
+- 或用 PowerShell 手动运行：
+  python -m streamlit run app.py --server.port 8501

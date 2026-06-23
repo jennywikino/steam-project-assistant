@@ -5,13 +5,15 @@
 Recommended order after downloading the GitHub Release zip:
 
 1. Unzip the release package.
-2. Double-click `安装依赖.bat`.
-3. Double-click `启动工具.bat`.
-4. If you need Steam page collection, double-click `安装采集环境.bat`.
+2. Double-click `1_首次使用_安装运行依赖.bat`.
+3. Double-click `2_启动工具.bat`.
+4. Optional: double-click `3_可选_安装Steam页面采集环境.bat` if you need Steam page collection.
+
+The project root contains program files. Normal users only need to focus on `0_先看这里_启动说明.txt`, `1_首次使用_安装运行依赖.bat`, `2_启动工具.bat`, and `3_可选_安装Steam页面采集环境.bat`.
 
 Windows may show an unknown publisher warning for `.bat` or `.vbs` files. Use the scripts from the official GitHub Release only.
 
-The VBS launcher is optional and not recommended for first-time setup because it hides the console window and can make failures harder to see.
+VBS launchers, debug startup scripts, stop scripts, and local validation scripts are not recommended for normal users.
 
 ## Script logs
 
@@ -38,7 +40,7 @@ python -m playwright install chromium
 也可以双击：
 
 ```text
-安装采集环境.bat
+3_可选_安装Steam页面采集环境.bat
 ```
 
 脚本不会假设 `.venv` 已存在，会优先使用 `py -3`，找不到时回退到 `python`。安装过程会写入：

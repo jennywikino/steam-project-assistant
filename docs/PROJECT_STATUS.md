@@ -1,5 +1,28 @@
 # PROJECT_STATUS
 
+## 当前已完成 V0.9.1-P3d-root-entry-naming-hotfix
+
+- Root entry names were changed to `0_先看这里_启动说明.txt`, `1_首次使用_安装运行依赖.bat`, `2_启动工具.bat`, and `3_可选_安装Steam页面采集环境.bat`.
+- Old ambiguous names were removed from the root to avoid duplicate entrypoints.
+- Batch file contents remain ASCII-only and continue to avoid `.venv` and hard-coded paths.
+- README, SETUP, and startup instructions now describe the 0 / 1 / 2 / 3 flow.
+
+## 当前已完成 V0.9.1-P3c-root-entry-cleanup
+
+- Root user entrypoints were simplified to `安装依赖.bat`, `启动工具.bat`, `安装采集环境.bat`, and `启动说明.txt`.
+- Duplicate numbered launcher scripts and `START_HERE` were removed.
+- The VBS launcher was removed from ordinary user entrypoints.
+- Debug, stop, and local validation scripts were moved to `tools/dev_scripts/`.
+- Startup documentation now recommends only the three Chinese batch files for normal users.
+
+## 当前已完成 V0.9.1-P3-release-entrypoint-cleanup
+
+- Added numbered Release entry scripts: `01_INSTALL_DEPENDENCIES.bat`, `02_START_TOOL.bat`, and `03_INSTALL_STEAM_COLLECTOR.bat`.
+- Added `START_HERE` with `README_FIRST.txt` and matching 01 / 02 / 03 wrapper scripts.
+- Downgraded `启动工具_无黑窗.vbs` to call only `02_START_TOOL.bat` and avoid the `????.bat` failure.
+- Updated README, SETUP, and `启动说明.txt` to make the first-time flow clear.
+- Core app logic was not changed.
+
 ## 当前已完成 V0.9.1-P2-release-script-encoding-hotfix
 
 - Windows `.bat` scripts now use ASCII-only content to avoid CMD code page issues on external machines.
