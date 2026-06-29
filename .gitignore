@@ -33,3 +33,7 @@ config/secrets.*
 
 # Local work data
 data/
+
+dist/
+dist_test/
+tools/runtime/
