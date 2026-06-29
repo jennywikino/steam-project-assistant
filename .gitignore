@@ -37,3 +37,6 @@ data/
 dist/
 dist_test/
 tools/runtime/
+dist/
+dist_test/
+tools/runtime/
