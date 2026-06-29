@@ -249,7 +249,7 @@ from modules.steam_search_importer import (
     validate_steam_search_url,
 )
 from modules.steam_data_normalizer import normalize_steam_game_data
-from modules.steam_review_stats import get_cached_review_stats
+from modules.steam_review_stats import get_cached_review_stats, load_cached_review_stats
 from modules.steam_store_feed_fetcher import (
     SteamStoreFeedItem,
     SteamStoreFeedResult,
@@ -303,6 +303,7 @@ STEAM_REVIEW_PREVIEW_CACHE_DIR = BASE_DIR / "data" / "cache" / "steam_reviews_pr
 STEAM_IMAGE_CACHE_PATH = BASE_DIR / "data" / "cache" / "steam_images_cache.json"
 STEAM_APPDETAILS_CACHE_PATH = BASE_DIR / "data" / "cache" / "steam_appdetails_cache.json"
 STEAM_REVIEW_STATS_CACHE_PATH = BASE_DIR / "data" / "cache" / "steam_review_stats_cache.json"
+HOME_FEED_ENRICH_LIMIT = 30
 STEAM_COMPETITOR_CACHE_PATH = BASE_DIR / "data" / "cache" / "steam_competitor_search_cache.json"
 APPDETAILS_DEBUG_DIR = BASE_DIR / "debug"
 SHOW_DEBUG_INFO = False
@@ -6279,8 +6280,9 @@ def render_home_dashboard_page() -> None:
     pending_projects = filter_pending_projects(active_projects)
     loaded_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     st.session_state["home_last_loaded_at"] = loaded_at
+    steam_feed = load_home_steam_feed_with_daily_refresh()
 
-    refresh_cols = st.columns([1, 1, 1, 3])
+    refresh_cols = st.columns([1, 1, 3])
     if refresh_cols[0].button("导入项目", key="home_go_import", use_container_width=True):
         st.session_state["import_mode"] = "Steam 搜索导入"
         st.session_state["pending_nav_page"] = "项目导入"
@@ -6288,26 +6290,127 @@ def render_home_dashboard_page() -> None:
     if refresh_cols[1].button("打开候选池", key="home_go_candidate_pool", use_container_width=True):
         st.session_state["pending_home_target"] = "candidate_pool"
         home_toast("已定位到候选池。")
-    if refresh_cols[2].button("重新读取本地数据", key="home_refresh_workbench", use_container_width=True):
-        st.session_state["home_refresh_token"] = int(st.session_state.get("home_refresh_token", 0)) + 1
-        home_toast("已重新读取本地数据。")
-        st.rerun()
-    refresh_cols[3].caption(f"页面读取时间：{loaded_at}")
-    st.caption("重新读取本地数据只会刷新本机 data/ 和 cache/ 中已有记录，不等于重新抓取 Steam 最新项目。项目卡片时间来自各项目的采集/入池时间。")
+    refresh_cols[2].caption(f"页面读取时间：{loaded_at}")
+    refresh_cols[2].caption(f"图文源刷新时间：{steam_feed.fetched_at or '未记录'}")
+    feed_refresh_message = st.session_state.pop("home_feed_refresh_message", "")
+    if feed_refresh_message:
+        (st.warning if "失败" in feed_refresh_message else st.success)(feed_refresh_message)
 
     if st.session_state.get("home_appdetails_clear_message"):
         st.success(st.session_state.pop("home_appdetails_clear_message"))
 
     render_home_metrics(daily_notes, active_projects, pending_projects, candidate_pool)
     st.caption("用于快速查看最近采集、导入和待处理的 Steam 项目。优先处理未上线、有 Demo、自发行、资料不足但值得继续判断的项目。")
-    render_home_quick_entries()
 
-    steam_feed = load_steam_store_home_feed(STEAM_HOME_FEED_CACHE_PATH, force_refresh=False)
     render_home_project_discovery_feed(candidate_pool, steam_feed, snapshots, daily_notes)
     render_home_recent_actions()
     render_home_advanced_refresh()
     render_appdetails_cache_reference()
     render_home_low_frequency_links()
+
+
+def load_home_steam_feed_with_daily_refresh() -> SteamStoreFeedResult:
+    cached_at = read_steam_home_feed_cache_time(STEAM_HOME_FEED_CACHE_PATH)
+    should_refresh = cached_at is None or (datetime.now() - cached_at).total_seconds() > 24 * 60 * 60
+    already_attempted = bool(st.session_state.get("home_feed_auto_refreshed_today"))
+    if should_refresh and not already_attempted:
+        st.session_state["home_feed_auto_refreshed_today"] = True
+        refreshed = refresh_steam_graph_feed_and_invalidate_home_state(reason="auto")
+        if refreshed.success and not refreshed.used_stale_cache:
+            return refreshed
+        st.warning("自动刷新失败，已继续使用本地缓存")
+        return refreshed
+    return load_steam_store_home_feed(STEAM_HOME_FEED_CACHE_PATH, force_refresh=False)
+
+
+def refresh_steam_graph_feed_and_invalidate_home_state(reason: str) -> SteamStoreFeedResult:
+    refreshed = load_steam_store_home_feed(STEAM_HOME_FEED_CACHE_PATH, force_refresh=True)
+    if refreshed.success and not refreshed.used_stale_cache:
+        enrichment_stats = enrich_refreshed_steam_feed_basic_info(refreshed, limit=HOME_FEED_ENRICH_LIMIT)
+        invalidate_home_feed_display_state()
+        st.session_state["home_feed_refresh_token"] = int(st.session_state.get("home_feed_refresh_token", 0)) + 1
+        st.session_state["home_feed_last_refresh_reason"] = reason
+        st.session_state["home_feed_enrichment_stats"] = enrichment_stats
+    return refreshed
+
+
+def enrich_refreshed_steam_feed_basic_info(
+    steam_feed: SteamStoreFeedResult,
+    limit: int = HOME_FEED_ENRICH_LIMIT,
+) -> dict:
+    cards = collect_steam_store_cards(steam_feed)
+    appids = [clean_candidate_value(card.get("appid")) for card in cards]
+    appids = list(dict.fromkeys(appid for appid in appids if appid))[: max(0, int(limit))]
+    stats = {
+        "requested": len(appids),
+        "completed": 0,
+        "pending": 0,
+        "review_completed": 0,
+    }
+    for appid in appids:
+        detail = {}
+        reviews = {}
+        try:
+            detail = get_cached_appdetails_summary(appid, STEAM_APPDETAILS_CACHE_PATH)
+        except Exception:
+            detail = {}
+        try:
+            reviews = get_cached_review_stats(appid, STEAM_REVIEW_STATS_CACHE_PATH)
+        except Exception:
+            reviews = {}
+        if detail.get("success"):
+            stats["completed"] += 1
+        else:
+            stats["pending"] += 1
+        if reviews.get("success"):
+            stats["review_completed"] += 1
+    return stats
+
+
+def invalidate_home_feed_display_state() -> int:
+    exact_keys = {
+        "home_project_feed_visible_count",
+        "home_project_feed_previous_filter",
+        "home_project_feed_visible_count_by_filter",
+        "home_feed_cards",
+        "home_feed_filtered_cards",
+        "home_feed_visible_cards",
+        "home_feed_page",
+        "home_feed_load_more",
+        "home_feed_cards_cache",
+    }
+    prefixes = (
+        "home_feed_cards_",
+        "home_feed_filtered_cards_",
+        "home_feed_visible_cards_",
+        "home_feed_page_",
+        "home_feed_load_more_",
+        "home_feed_cards_cache_",
+        "home_project_feed_cached_",
+    )
+    keys = [
+        key
+        for key in list(st.session_state.keys())
+        if key in exact_keys or key.startswith(prefixes)
+    ]
+    for key in keys:
+        st.session_state.pop(key, None)
+    st.session_state["home_project_feed_filter"] = "全部"
+    return len(keys)
+
+
+def read_steam_home_feed_cache_time(cache_path: Path) -> datetime | None:
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    value = str(payload.get("fetched_at", "") or "").strip()
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 
@@ -6326,22 +6429,6 @@ def show_pending_home_toast() -> None:
     message = st.session_state.pop("home_pending_toast", "")
     if message:
         home_toast(message)
-
-
-def render_home_quick_entries() -> None:
-    st.markdown("#### 快捷入口")
-    cols = st.columns(3)
-    entries = [
-        ("项目导入", "project_import"),
-        ("竞品与候选", "candidate_pool"),
-        ("一键项目画像", "profile"),
-    ]
-    for col, (label, target) in zip(cols, entries):
-        with col:
-            if st.button(label, key=f"home_quick_entry_{target}", use_container_width=True):
-                if target == "project_import":
-                    st.session_state["import_mode"] = "Steam 搜索导入"
-                request_nav(target)
 
 
 def render_home_recent_actions() -> None:
@@ -6379,10 +6466,18 @@ def render_home_recent_actions() -> None:
 def render_home_advanced_refresh() -> None:
     with st.expander("高级刷新 / 缓存维护", expanded=False):
         st.caption("高级操作只处理首页展示缓存或 Steam 图文源缓存，不会删除 candidate_pool.csv 和 steam_browser_collected.csv。")
+        if st.button("重新读取本地数据", key="home_refresh_workbench_advanced", use_container_width=True):
+            st.session_state["home_refresh_token"] = int(st.session_state.get("home_refresh_token", 0)) + 1
+            home_toast("已重新读取本地数据。")
+            st.rerun()
+        st.caption("只重新读取本机 data/cache，不会请求 Steam。")
         cols = st.columns(4)
         if cols[0].button("强制刷新 Steam 图文源", key="home_force_refresh_feed", use_container_width=True):
-            load_steam_store_home_feed(STEAM_HOME_FEED_CACHE_PATH, force_refresh=True)
-            home_toast("Steam 图文源已强制刷新。")
+            refreshed_feed = refresh_steam_graph_feed_and_invalidate_home_state(reason="manual_advanced")
+            if refreshed_feed.success and not refreshed_feed.used_stale_cache:
+                home_toast("Steam 图文源已强制刷新。")
+            else:
+                st.warning("Steam 图文源刷新失败，已继续使用本地缓存。")
             st.rerun()
         cols[0].caption("会重新请求 Steam 图文源，可能受 Steam 网络影响。")
         if cols[1].button("强制刷新当前卡片详情", key="home_force_refresh_details", use_container_width=True):
@@ -6442,7 +6537,7 @@ def clear_home_session_display_cache() -> int:
     ]
     for key in keys:
         st.session_state.pop(key, None)
-    return len(keys)
+    return len(keys) + invalidate_home_feed_display_state()
 
 
 def render_appdetails_cache_reference() -> None:
@@ -6547,15 +6642,71 @@ def build_home_project_feed_cards(
     snapshots: pd.DataFrame,
     daily_notes: pd.DataFrame,
 ) -> list[dict]:
-    cards: list[dict] = []
-    cards.extend(home_cards_from_browser_collected())
-    cards.extend(home_cards_from_candidate_pool(candidate_pool))
-    cards.extend(collect_manual_observation_cards(snapshots, daily_notes))
-    cards.extend(collect_steam_store_cards(steam_feed))
+    browser_cards = home_cards_from_browser_collected()
+    candidate_cards = home_cards_from_candidate_pool(candidate_pool)
+    manual_cards = collect_manual_observation_cards(snapshots, daily_notes)
+    steam_cards = enrich_steam_feed_cards_from_cache(collect_steam_store_cards(steam_feed))
+    candidate_by_appid = {
+        clean_candidate_value(card.get("appid")): card
+        for card in candidate_cards
+        if clean_candidate_value(card.get("appid"))
+    }
+    steam_cards = [
+        merge_candidate_context_into_steam_feed_card(card, candidate_by_appid.get(clean_candidate_value(card.get("appid")), {}))
+        for card in steam_cards
+    ]
+    cards = browser_cards + candidate_cards + manual_cards + steam_cards
     hidden_appids = ignored_candidate_appids_for_home()
     if hidden_appids:
         cards = [card for card in cards if clean_candidate_value(card.get("appid")) not in hidden_appids]
     return dedupe_and_sort_home_project_feed_cards(cards)
+
+
+def enrich_steam_feed_cards_from_cache(cards: list[dict]) -> list[dict]:
+    try:
+        appdetails_cache = load_cached_appdetails_summaries(STEAM_APPDETAILS_CACHE_PATH)
+    except Exception:
+        appdetails_cache = {}
+    try:
+        review_cache = load_cached_review_stats(STEAM_REVIEW_STATS_CACHE_PATH)
+    except Exception:
+        review_cache = {}
+    enriched_cards = []
+    for original in cards:
+        card = dict(original)
+        appid = clean_candidate_value(card.get("appid"))
+        detail = appdetails_cache.get(appid, {}) if appid else {}
+        reviews = review_cache.get(appid, {}) if appid else {}
+        if detail:
+            card = merge_appdetails_into_home_card(card, detail)
+        if reviews.get("success"):
+            card = merge_review_stats_into_home_card(card, reviews)
+        card["source_time"] = clean_candidate_value(
+            original.get("source_time") or original.get("feed_fetched_at") or original.get("feed_updated_at")
+        )
+        card["feed_fetched_at"] = clean_candidate_value(original.get("feed_fetched_at") or original.get("feed_updated_at"))
+        card["enriched_at"] = clean_candidate_value(
+            detail.get("checked_at") or (reviews.get("fetched_at") if reviews.get("success") else "")
+        )
+        card["basic_info_status"] = "已补全" if detail.get("success") else "待补资料"
+        if not detail.get("success"):
+            card["next_action"] = clean_candidate_value(card.get("next_action")) or "待补资料"
+        enriched_cards.append(card)
+    return enriched_cards
+
+
+def merge_candidate_context_into_steam_feed_card(steam_card: dict, candidate_card: dict) -> dict:
+    if not candidate_card:
+        return steam_card
+    merged = dict(steam_card)
+    merged["candidate_updated_at"] = clean_candidate_value(
+        candidate_card.get("candidate_updated_at") or candidate_card.get("feed_updated_at")
+    )
+    for key in ["stage", "priority", "next_action", "auto_suggestion", "auto_reason"]:
+        value = candidate_card.get(key)
+        if not is_missing_card_value(value):
+            merged[key] = value
+    return merged
 
 
 def home_cards_from_browser_collected() -> list[dict]:
@@ -6635,6 +6786,7 @@ def home_cards_from_candidate_pool(candidate_pool: pd.DataFrame) -> list[dict]:
                 "stage": clean_candidate_value(row_dict.get("stage")),
                 "priority": clean_candidate_value(row_dict.get("priority")),
                 "feed_updated_at": clean_candidate_value(row_dict.get("updated_at") or row_dict.get("created_at")),
+                "candidate_updated_at": clean_candidate_value(row_dict.get("updated_at") or row_dict.get("created_at")),
                 "feed_source_rank": 2,
                 "feed_category": "候选池",
             }
@@ -6697,11 +6849,22 @@ def dedupe_and_sort_home_project_feed_cards(cards: list[dict]) -> list[dict]:
 
 
 def home_feed_timestamp(card: dict) -> pd.Timestamp:
-    value = card.get("feed_updated_at") or card.get("updated_at") or card.get("collected_at") or card.get("created_at")
-    ts = pd.to_datetime(value, errors="coerce")
-    if pd.isna(ts):
-        return pd.Timestamp.min
-    return ts
+    timestamps = []
+    for key in [
+        "collected_at",
+        "created_at",
+        "updated_at",
+        "feed_fetched_at",
+        "source_time",
+        "imported_at",
+        "feed_updated_at",
+    ]:
+        ts = pd.to_datetime(card.get(key), errors="coerce")
+        if not pd.isna(ts):
+            if getattr(ts, "tzinfo", None) is not None:
+                ts = ts.tz_localize(None)
+            timestamps.append(ts)
+    return max(timestamps) if timestamps else pd.Timestamp.min
 
 
 def home_feed_timestamp_value(card: dict) -> int:
@@ -6753,7 +6916,7 @@ def render_home_project_feed_card(card: dict, index: int) -> None:
             st.warning("竞品参考")
         elif suggestion:
             st.info(suggestion)
-        st.caption(f"发售：{compact_card_value(card.get('release_date') or card.get('release_status'))}")
+        st.caption(f"发售：{compact_card_value(home_feed_release_display_value(card))}")
         st.caption(f"Demo：{compact_card_value(card.get('has_demo'))} · 简中：{compact_card_value(card.get('supports_schinese'))}")
         st.caption(f"开发：{compact_card_value(card.get('developer'))}")
         st.caption(f"发行：{compact_card_value(card.get('publisher'))}")
@@ -6782,20 +6945,32 @@ HOME_FEED_FILTER_OPTIONS = [
     "未上线/TBA",
     "有 Demo/可试玩",
     "无发行/自发行",
-    "热门/评论多",
-    "潜力观察",
-    "竞品参考",
 ]
 
 HOME_FEED_FILTER_DESCRIPTIONS = {
-    "最新采集": "最近通过浏览器采集或导入的项目",
-    "未上线/TBA": "仍处于 Coming Soon / TBA / 未来发售状态",
+    "最新采集": "统一首页 Feed 中有来源时间的项目，包含最新 Steam 图文源、浏览器采集、导入、候选和观察记录",
+    "未上线/TBA": (
+        "TBA / 未上线表示当前检查时的 Steam 状态，不代表它从该日期开始 TBA。"
+        "如果要追踪“什么时候开始 TBA”，需要启用后续历史快照功能。"
+    ),
     "有 Demo/可试玩": "可优先进入试玩验证",
     "无发行/自发行": "潜在发行机会更高",
-    "热门/评论多": "适合竞品或市场参考",
-    "潜力观察": "需要补资料或继续判断",
-    "竞品参考": "已有发行或成熟项目，适合参考不一定适合联系",
 }
+
+HOME_FEED_OBSERVATION_WINDOW_OPTIONS = [
+    "今天",
+    "最近 7 天",
+    "最近 30 天",
+    "全部本地记录",
+    "自定义日期范围",
+]
+
+HOME_FEED_TIME_BASIS_OPTIONS = [
+    "自动",
+    "发现/读取时间",
+    "入池/导入时间",
+    "最近补全时间",
+]
 
 BIG_PUBLISHER_KEYWORDS = [
     "electronic arts",
@@ -6828,6 +7003,70 @@ def render_home_project_discovery_feed(
     daily_notes: pd.DataFrame,
 ) -> None:
     st.subheader("项目发现 Feed")
+    candidate_appids = home_feed_candidate_appids(candidate_pool)
+    canonical_cards = build_home_project_feed_cards(candidate_pool, steam_feed, snapshots, daily_notes)
+    today = datetime.now().date()
+    known_dates = [
+        timestamp.date()
+        for card in canonical_cards
+        for timestamp in [home_feed_time_for_basis(card, "自动")]
+        if timestamp is not None
+    ]
+    earliest_local_date = min(known_dates) if known_dates else today
+
+    control_cols = st.columns([1.1, 1.25, 1.25])
+    observation_window = control_cols[0].selectbox(
+        "观察窗口",
+        HOME_FEED_OBSERVATION_WINDOW_OPTIONS,
+        index=1,
+        key="home_feed_observation_window",
+    )
+    if st.session_state.get("home_feed_time_basis") not in HOME_FEED_TIME_BASIS_OPTIONS:
+        st.session_state["home_feed_time_basis"] = "自动"
+    time_basis = control_cols[1].selectbox(
+        "按哪个时间筛选",
+        HOME_FEED_TIME_BASIS_OPTIONS,
+        index=0,
+        key="home_feed_time_basis",
+        help="用于决定观察窗口按哪个时间字段过滤。普通情况下保持“自动”即可。",
+    )
+    if control_cols[2].button("刷新（需联网 Steam）", key="home_refresh_steam_feed_online", use_container_width=True):
+        refreshed_feed = refresh_steam_graph_feed_and_invalidate_home_state(reason="manual")
+        if refreshed_feed.success and not refreshed_feed.used_stale_cache:
+            stats = st.session_state.get("home_feed_enrichment_stats", {})
+            completed = int(stats.get("completed", 0) or 0)
+            requested = int(stats.get("requested", 0) or 0)
+            pending = int(stats.get("pending", 0) or 0)
+            if pending:
+                st.session_state["home_feed_refresh_message"] = (
+                    f"Steam 图文源已刷新；已对前 {requested} 个项目补全基础信息，"
+                    f"成功 {completed} 个，部分项目补全失败，已标记为待补资料。"
+                )
+            else:
+                st.session_state["home_feed_refresh_message"] = (
+                    f"Steam 图文源刷新成功；已对前 {requested} 个项目补全基础信息。"
+                )
+        else:
+            st.session_state["home_feed_refresh_message"] = "Steam 图文源联网刷新失败，已继续使用本地缓存。"
+        st.rerun()
+    control_cols[2].caption("重新请求 Steam 图文源。不会扫描全 Steam，只更新首页图文源范围。")
+
+    custom_start = max(earliest_local_date, (pd.Timestamp(today) - pd.DateOffset(days=7)).date())
+    custom_end = today
+    if observation_window == "自定义日期范围":
+        custom_value = st.date_input(
+            "自定义日期范围",
+            value=(custom_start, custom_end),
+            min_value=earliest_local_date,
+            max_value=today,
+            key="home_feed_custom_date_range",
+        )
+        if isinstance(custom_value, (tuple, list)) and len(custom_value) == 2:
+            custom_start, custom_end = custom_value
+        else:
+            custom_start = custom_end = custom_value
+    if st.session_state.get("home_project_feed_filter") not in HOME_FEED_FILTER_OPTIONS:
+        st.session_state["home_project_feed_filter"] = "全部"
     feed_filter = st.radio("Feed 筛选", HOME_FEED_FILTER_OPTIONS, horizontal=True, key="home_project_feed_filter")
     if feed_filter in HOME_FEED_FILTER_DESCRIPTIONS:
         st.caption(f"{feed_filter}：{HOME_FEED_FILTER_DESCRIPTIONS[feed_filter]}")
@@ -6838,12 +7077,60 @@ def render_home_project_discovery_feed(
         st.session_state["home_project_feed_visible_count_by_filter"] = visible_by_filter
     visible_count = int(visible_by_filter.get(feed_filter, 12) or 12)
 
-    candidate_appids = home_feed_candidate_appids(candidate_pool)
-    cards = build_home_project_feed_cards(candidate_pool, steam_feed, snapshots, daily_notes)
-    filtered_cards = [card for card in cards if home_feed_card_matches_filter(card, feed_filter)]
-    filtered_cards = sort_home_project_feed_cards(filtered_cards, feed_filter)
+    range_start, range_end = resolve_home_feed_observation_window(
+        observation_window,
+        canonical_cards,
+        time_basis,
+        custom_start,
+        custom_end,
+    )
+    windowed_cards = filter_home_feed_by_observation_window(
+        canonical_cards,
+        observation_window,
+        time_basis,
+        range_start,
+        range_end,
+    )
+    scope_key = f"{observation_window}|{time_basis}|{range_start}|{range_end}"
+    if st.session_state.get("home_feed_previous_scope") != scope_key:
+        visible_by_filter = {}
+        st.session_state["home_project_feed_visible_count_by_filter"] = visible_by_filter
+        st.session_state["home_feed_previous_scope"] = scope_key
+        visible_count = 12
+    filtered_cards = apply_home_feed_filter(windowed_cards, feed_filter, time_basis=time_basis)
+    shown_count = min(visible_count, len(filtered_cards))
+    steam_cards = [card for card in canonical_cards if card.get("card_type") == "steam_store"]
+    completed_count = sum(card.get("basic_info_status") == "已补全" for card in steam_cards)
+    pending_count = sum(card.get("basic_info_status") != "已补全" for card in steam_cards)
+    st.caption(
+        f"当前观察窗口：{range_start:%Y-%m-%d} 至 {range_end:%Y-%m-%d} · "
+        f"按哪个时间筛选：{time_basis} · 当前筛选：{len(filtered_cards)} 个，已显示 {shown_count} 个 · "
+        f"已补全：{completed_count} 个，待补：{pending_count} 个"
+    )
+    st.caption(
+        "说明：当前范围为本工具已采集、导入、缓存或图文源获取到的项目；不是 Steam 全量库。"
+        "未知字段不会被当作“无 Demo”或“自发行”。"
+    )
+    with st.expander("关于首页数据范围", expanded=False):
+        st.markdown(
+            "- 首页不是全 Steam 扫描。\n"
+            "- TBA / 未上线表示当前检查时的 Steam 状态。\n"
+            "- 如果要知道“什么时候开始 TBA”，需要后续历史快照功能。\n"
+            "- 如果要看全 Steam TBA，需要单独做全量扫描、SteamDB 导入或 Coming Soon 监控。"
+        )
     if not filtered_cards:
-        st.info("当前筛选暂无项目。可以先用项目导入里的 Steam 页面采集，或切换到“全部”。")
+        if feed_filter == "未上线/TBA":
+            st.info(
+                "当前观察窗口内，本工具已采集范围暂无未上线 / TBA 项目。\n\n"
+                "这不代表 Steam 全量库没有 TBA 项目。\n\n"
+                "可以扩大观察窗口，或使用 Steam 搜索导入 / Steam 页面采集补充数据。"
+            )
+        else:
+            st.info(
+                "当前观察窗口内暂无符合条件的项目。\n\n"
+                "这不代表历史上没有，只表示当前日期范围和所选时间下没有命中。\n\n"
+                "可以切换到“最近 30 天”或“全部本地记录”。"
+            )
         return
 
     visible_cards = enrich_steam_store_cards(filtered_cards[:visible_count], limit=visible_count)
@@ -6852,7 +7139,6 @@ def render_home_project_discovery_feed(
         with columns[index % 3]:
             render_home_project_feed_card(card, index, card.get("appid") in candidate_appids)
 
-    shown_count = min(visible_count, len(filtered_cards))
     if len(filtered_cards) > visible_count:
         if st.button("加载更多 12 个", key=f"home_project_feed_load_more_{feed_filter}", use_container_width=True):
             visible_by_filter[feed_filter] = visible_count + 12
@@ -6860,7 +7146,6 @@ def render_home_project_discovery_feed(
             st.rerun()
     else:
         st.caption("已显示全部。")
-    st.caption(f"当前分类 {len(filtered_cards)} 个项目，已显示 {shown_count} 个。")
 
 
 def home_feed_candidate_appids(candidate_pool: pd.DataFrame) -> set[str]:
@@ -6883,25 +7168,145 @@ def dedupe_and_sort_home_project_feed_cards(cards: list[dict]) -> list[dict]:
     return output
 
 
-def sort_home_project_feed_cards(cards: list[dict], feed_filter: str) -> list[dict]:
-    if feed_filter == "热门/评论多":
-        return sorted(cards, key=lambda card: (-home_feed_review_count(card), -home_feed_timestamp_value(card)))
-    if feed_filter == "竞品参考":
-        return sorted(cards, key=lambda card: (-home_feed_review_count(card), not home_feed_has_review_score(card), home_feed_is_unreleased(card), -home_feed_timestamp_value(card)))
+def sort_home_project_feed_cards(
+    cards: list[dict],
+    feed_filter: str,
+    time_basis: str = "自动",
+) -> list[dict]:
     if feed_filter == "未上线/TBA":
-        return sorted(cards, key=lambda card: (-home_feed_opportunity_score(card), -home_feed_timestamp_value(card)))
+        return sorted(
+            cards,
+            key=lambda card: (-home_feed_opportunity_score(card), -home_feed_time_basis_value(card, time_basis)),
+        )
     if feed_filter == "无发行/自发行":
-        return sorted(cards, key=lambda card: (-home_feed_self_published_score(card), -home_feed_timestamp_value(card)))
-    if feed_filter == "潜力观察":
-        return sorted(cards, key=lambda card: (-home_feed_potential_score(card), -home_feed_timestamp_value(card)))
-    return sorted(cards, key=lambda card: (-home_feed_timestamp_value(card), int(card.get("feed_source_rank", 9) or 9)))
+        return sorted(
+            cards,
+            key=lambda card: (-home_feed_self_published_score(card), -home_feed_time_basis_value(card, time_basis)),
+        )
+    return sorted(
+        cards,
+        key=lambda card: (-home_feed_time_basis_value(card, time_basis), int(card.get("feed_source_rank", 9) or 9)),
+    )
+
+
+def apply_home_feed_filter(
+    cards: list[dict],
+    selected_filter: str,
+    time_basis: str = "自动",
+) -> list[dict]:
+    filtered = [card for card in cards if home_feed_card_matches_filter(card, selected_filter)]
+    return sort_home_project_feed_cards(filtered, selected_filter, time_basis=time_basis)
+
+
+def resolve_home_feed_observation_window(
+    observation_window: str,
+    cards: list[dict],
+    time_basis: str,
+    custom_start,
+    custom_end,
+) -> tuple:
+    today = datetime.now().date()
+    if observation_window == "今天":
+        return today, today
+    if observation_window == "最近 7 天":
+        return (pd.Timestamp(today) - pd.DateOffset(days=7)).date(), today
+    if observation_window == "最近 30 天":
+        return (pd.Timestamp(today) - pd.DateOffset(months=1)).date(), today
+    if observation_window == "自定义日期范围":
+        start = pd.Timestamp(custom_start).date()
+        end = pd.Timestamp(custom_end).date()
+        return (start, end) if start <= end else (end, start)
+    known_dates = [
+        timestamp.date()
+        for card in cards
+        for timestamp in [home_feed_time_for_basis(card, time_basis)]
+        if timestamp is not None
+    ]
+    return (min(known_dates), max(known_dates)) if known_dates else (today, today)
+
+
+def filter_home_feed_by_observation_window(
+    cards: list[dict],
+    observation_window: str,
+    time_basis: str,
+    range_start,
+    range_end,
+) -> list[dict]:
+    if observation_window == "全部本地记录":
+        return list(cards)
+    output = []
+    for card in cards:
+        timestamp = home_feed_time_for_basis(card, time_basis)
+        if timestamp is not None and range_start <= timestamp.date() <= range_end:
+            output.append(card)
+    return output
+
+
+def home_feed_time_for_basis(card: dict, time_basis: str) -> pd.Timestamp | None:
+    fields_by_basis = {
+        "发现/读取时间": ["feed_fetched_at", "source_time"],
+        "入池/导入时间": [
+            "collected_at",
+            "imported_at",
+            "created_at",
+            "candidate_updated_at",
+            "feed_updated_at",
+        ],
+        "最近补全时间": ["enriched_at", "updated_at", "candidate_updated_at"],
+        "自动": [
+            "feed_fetched_at",
+            "source_time",
+            "collected_at",
+            "imported_at",
+            "updated_at",
+            "created_at",
+            "enriched_at",
+            "candidate_updated_at",
+            "feed_updated_at",
+        ],
+    }
+    for field_name in fields_by_basis.get(time_basis, fields_by_basis["自动"]):
+        timestamp = pd.to_datetime(card.get(field_name), errors="coerce")
+        if pd.isna(timestamp):
+            continue
+        if getattr(timestamp, "tzinfo", None) is not None:
+            timestamp = timestamp.tz_localize(None)
+        return timestamp
+    return None
+
+
+def home_feed_time_basis_value(card: dict, time_basis: str) -> int:
+    timestamp = home_feed_time_for_basis(card, time_basis)
+    return int(timestamp.value) if timestamp is not None else 0
+
+
+def current_steam_feed_batch_cards(cards: list[dict]) -> list[dict]:
+    steam_cards = [card for card in cards if card.get("card_type") == "steam_store"]
+    if not steam_cards:
+        return []
+    latest_source_time = max(home_feed_source_timestamp_value(card) for card in steam_cards)
+    return [
+        card
+        for card in steam_cards
+        if home_feed_source_timestamp_value(card) == latest_source_time
+    ]
+
+
+def home_feed_source_timestamp_value(card: dict) -> int:
+    value = card.get("source_time") or card.get("feed_fetched_at") or card.get("feed_updated_at")
+    timestamp = pd.to_datetime(value, errors="coerce")
+    if pd.isna(timestamp):
+        return 0
+    if getattr(timestamp, "tzinfo", None) is not None:
+        timestamp = timestamp.tz_localize(None)
+    return int(timestamp.value)
 
 
 def home_feed_card_matches_filter(card: dict, feed_filter: str) -> bool:
     if feed_filter == "全部":
         return True
     if feed_filter == "最新采集":
-        return card.get("card_type") in {"steam_browser_collected", "candidate_pool_feed"} and home_feed_timestamp_value(card) > 0
+        return True
     if feed_filter == "未上线/TBA":
         return home_feed_is_unreleased(card)
     if feed_filter == "有 Demo/可试玩":
@@ -6913,12 +7318,6 @@ def home_feed_card_matches_filter(card: dict, feed_filter: str) -> bool:
             and not home_feed_is_big_publisher(card)
             and not (home_feed_is_released(card) and not home_feed_has_demo(card))
         )
-    if feed_filter == "热门/评论多":
-        return home_feed_review_count(card) >= 500 or home_feed_has_review_score(card) or home_feed_has_hot_source(card)
-    if feed_filter == "潜力观察":
-        return home_feed_is_potential_watch(card)
-    if feed_filter == "竞品参考":
-        return home_feed_is_competitor_reference(card)
     return True
 
 
@@ -6933,10 +7332,13 @@ def render_home_project_feed_card(card: dict, index: int, already_in_candidate_p
         if image_url:
             st.image(image_url, use_container_width=True)
         st.markdown(f"**{game_name}**")
-        st.caption(f"{home_feed_source_label(card)} · AppID：{appid or '未获取'}")
+        st.caption(f"来源：{home_feed_source_label(card)} · AppID：{appid or '未获取'}")
         card_time = home_feed_card_time_label(card)
         if card_time:
             st.caption(card_time)
+        candidate_time = clean_candidate_value(card.get("candidate_updated_at"))
+        if candidate_time and candidate_time != clean_candidate_value(card.get("source_time")):
+            st.caption(f"入池时间：{candidate_time}")
 
         tags = home_feed_card_tags(card)
         if tags:
@@ -6948,9 +7350,7 @@ def render_home_project_feed_card(card: dict, index: int, already_in_candidate_p
         st.caption(f"开发：{compact_card_value(card.get('developer'))}")
         st.caption(f"发行：{compact_card_value(card.get('publisher'))}")
         st.caption(f"类型：{compact_card_value(card.get('genres') or card.get('genres_tags'), max_len=60)}")
-        review_count = home_feed_review_count(card)
-        if review_count:
-            st.caption(f"评论数：{review_count}")
+        st.caption(f"评论数：{home_feed_review_display_value(card)}")
         st.caption(f"下一步建议：{compact_card_value(suggestion)}")
         if candidate_status:
             joined_at = clean_candidate_value(candidate_status.get("created_at"))
@@ -7012,6 +7412,8 @@ def home_feed_card_tags(card: dict) -> list[str]:
         tags.append("有 Demo")
     if home_feed_supports_schinese(card):
         tags.append("简中")
+    if home_feed_is_early_access(card) and not home_feed_is_unreleased(card):
+        tags.append("抢先体验")
     if home_feed_is_self_published(card):
         tags.append("自发行")
     if home_feed_is_competitor_reference(card):
@@ -7032,7 +7434,7 @@ def home_feed_source_label(card: dict) -> str:
     if "steam search" in source_text or "steam 搜索" in source_text:
         return "Steam 搜索导入"
     if "steamdb" in source_text or "粘贴" in source_text:
-        return "SteamDB 粘贴导入"
+        return "SteamDB 导入"
     if card.get("card_type") in {"daily_watch", "snapshot"} or "手动观察" in source_text or "首页快照" in source_text:
         return "手动观察"
     if card.get("card_type") == "steam_store" or clean_candidate_value(card.get("card_data_source")) == "feed_cache":
@@ -7043,19 +7445,26 @@ def home_feed_source_label(card: dict) -> str:
 
 
 def home_feed_card_time_label(card: dict) -> str:
-    value = clean_candidate_value(
-        card.get("feed_updated_at")
-        or card.get("collected_at")
-        or card.get("created_at")
-        or card.get("feed_fetched_at")
-    )
-    if not value:
-        return ""
-    if card.get("card_type") == "steam_store":
-        return f"图文源读取时间：{value}"
-    if card.get("card_type") == "candidate_pool_feed":
-        return f"入池/更新时间：{value}"
-    return f"采集/记录时间：{value}"
+    timestamp = home_feed_time_for_basis(card, "自动")
+    if timestamp is None:
+        return "观察时间：未记录"
+    return f"观察时间：{timestamp:%Y-%m-%d %H:%M:%S}"
+
+
+def home_feed_review_display_value(card: dict) -> str:
+    for key in ["review_count", "reviews_count", "reviews_total", "review_total"]:
+        if key not in card:
+            continue
+        value = card.get(key)
+        if value is None:
+            continue
+        try:
+            return f"{int(float(value)):,}"
+        except (TypeError, ValueError):
+            text = str(value).strip()
+            if text and not is_missing_card_value(text):
+                return text
+    return "未确认"
 
 
 def home_feed_text_blob(card: dict) -> str:
@@ -7078,6 +7487,52 @@ def home_feed_release_text(card: dict) -> str:
     return " ".join([str(card.get("release_date", "") or ""), str(card.get("release_status", "") or "")]).casefold()
 
 
+def home_feed_early_access_text(card: dict) -> str:
+    values = [
+        card.get("app_type"),
+        card.get("genres"),
+        card.get("genres_tags"),
+        card.get("categories"),
+        card.get("tags"),
+        card.get("release_status"),
+        card.get("release_date"),
+    ]
+    return " ".join(str(value or "") for value in values).casefold()
+
+
+def home_feed_is_early_access(card: dict) -> bool:
+    text = home_feed_early_access_text(card)
+    return "early access" in text or "抢先体验" in text
+
+
+def home_feed_release_date_value(card: dict):
+    raw_value = card.get("release_date") or card.get("release_status")
+    parsed = parse_steam_release_date(raw_value)
+    if parsed:
+        return parsed
+    timestamp = pd.to_datetime(raw_value, errors="coerce")
+    if pd.isna(timestamp):
+        return None
+    if getattr(timestamp, "tzinfo", None) is not None:
+        timestamp = timestamp.tz_localize(None)
+    return timestamp.date()
+
+
+def home_feed_has_live_release_evidence(card: dict) -> bool:
+    if home_feed_review_count(card) > 0:
+        return True
+    for key in ["current_ccu", "current_players", "peak_ccu", "steamdb_peak_ccu"]:
+        value = card.get(key)
+        digits = re.sub(r"[^0-9]", "", str(value or ""))
+        if digits and int(digits) > 0:
+            return True
+    for key in ["can_purchase", "is_purchasable", "purchase_available", "is_released"]:
+        value = str(card.get(key, "") or "").strip().casefold()
+        if value in {"是", "yes", "true", "1", "available", "可购买", "已发售"}:
+            return True
+    return False
+
+
 def home_feed_has_demo(card: dict) -> bool:
     value = str(card.get("has_demo", "") or "").strip().casefold()
     text = home_feed_text_blob(card)
@@ -7092,30 +7547,44 @@ def home_feed_supports_schinese(card: dict) -> bool:
 def home_feed_is_unreleased(card: dict) -> bool:
     text = home_feed_release_text(card)
     all_text = home_feed_text_blob(card)
+    release_date = home_feed_release_date_value(card)
+    today = datetime.now().date()
+    if home_feed_has_live_release_evidence(card):
+        return False
+    if release_date and release_date <= today:
+        return False
     if any(token in text for token in ["coming soon", "tba", "即将推出", "即将", "待定", "未发售"]):
         return True
     if "未发售" in all_text:
         return True
-    date_value = pd.to_datetime(card.get("release_date"), errors="coerce")
-    if not pd.isna(date_value):
-        try:
-            date_value = date_value.tz_localize(None) if getattr(date_value, "tzinfo", None) else date_value
-            today = pd.Timestamp.now(tz=None).normalize()
-            return date_value.normalize() > today
-        except Exception:
-            return False
-    return False
+    if release_date:
+        return release_date > today
+    release_value = card.get("release_date") or card.get("release_status")
+    return is_missing_card_value(release_value) or bool(re.search(r"\b20\d{2}\b", text))
 
 
 def home_feed_is_released(card: dict) -> bool:
-    return not home_feed_is_unreleased(card) and bool(str(card.get("release_date", "") or "").strip())
+    release_value = card.get("release_date") or card.get("release_status")
+    return not is_missing_card_value(release_value) and not home_feed_is_unreleased(card)
+
+
+def home_feed_release_display_value(card: dict) -> str:
+    if home_feed_is_early_access(card) and not home_feed_is_unreleased(card):
+        return "已发售 / EA"
+    return clean_candidate_value(card.get("release_date") or card.get("release_status")) or "未确认"
 
 
 def home_feed_is_self_published(card: dict) -> bool:
-    developer = str(card.get("developer", "") or "").strip().casefold()
-    publisher = str(card.get("publisher", "") or "").strip().casefold()
+    developer_raw = card.get("developer")
+    publisher_raw = card.get("publisher")
     explicit = str(card.get("is_self_published", "") or "").strip().casefold()
-    return explicit in {"是", "yes", "true", "1"} or not publisher or (developer and publisher == developer)
+    if explicit in {"是", "yes", "true", "1"}:
+        return True
+    if is_missing_card_value(developer_raw) or is_missing_card_value(publisher_raw):
+        return False
+    developer = str(developer_raw).strip().casefold()
+    publisher = str(publisher_raw).strip().casefold()
+    return developer == publisher
 
 
 def home_feed_is_big_publisher(card: dict) -> bool:
@@ -7137,7 +7606,8 @@ def home_feed_review_count(card: dict) -> int:
 
 
 def home_feed_has_review_score(card: dict) -> bool:
-    return bool(str(card.get("review_score", "") or card.get("review_summary", "") or "").strip())
+    value = card.get("review_score") or card.get("review_score_desc") or card.get("review_summary")
+    return not is_missing_card_value(value)
 
 
 def home_feed_has_hot_source(card: dict) -> bool:
@@ -7159,7 +7629,8 @@ def home_feed_is_competitor_reference(card: dict) -> bool:
 def home_feed_is_data_incomplete(card: dict) -> bool:
     text = home_feed_text_blob(card)
     required = [card.get("game_name") or card.get("title"), card.get("developer"), card.get("publisher"), card.get("release_date")]
-    return "待补资料" in text or "资料不足" in text or sum(bool(str(value or "").strip()) for value in required) <= 2
+    known_count = sum(not is_missing_card_value(value) for value in required)
+    return "待补资料" in text or "资料不足" in text or known_count <= 2
 
 
 def home_feed_opportunity_score(card: dict) -> int:
@@ -7247,6 +7718,7 @@ def home_cards_from_browser_collected() -> list[dict]:
                 "auto_reason": clean_candidate_value(row_dict.get("import_reason")),
                 "import_reason": clean_candidate_value(row_dict.get("import_reason")),
                 "next_action": "试玩 Demo" if suggestion == "待试玩" else "补项目画像",
+                "collected_at": clean_candidate_value(row_dict.get("collected_at")),
                 "feed_updated_at": clean_candidate_value(row_dict.get("collected_at")),
                 "feed_source_rank": 1,
                 "feed_category": "最新采集",
@@ -7297,6 +7769,10 @@ def home_cards_from_candidate_pool(candidate_pool: pd.DataFrame) -> list[dict]:
                 "stage": clean_candidate_value(row_dict.get("stage")),
                 "priority": clean_candidate_value(row_dict.get("priority")),
                 "is_self_published": clean_candidate_value(row_dict.get("is_self_published")),
+                "imported_at": clean_candidate_value(row_dict.get("imported_at") or row_dict.get("created_at")),
+                "created_at": clean_candidate_value(row_dict.get("created_at")),
+                "updated_at": clean_candidate_value(row_dict.get("updated_at")),
+                "candidate_updated_at": clean_candidate_value(row_dict.get("updated_at") or row_dict.get("created_at")),
                 "feed_updated_at": clean_candidate_value(row_dict.get("updated_at") or row_dict.get("created_at")),
                 "feed_source_rank": 2,
                 "feed_category": "候选池",
@@ -9022,8 +9498,18 @@ def merge_appdetails_into_home_card(card: dict, detail: dict) -> dict:
     merged["html_fallback_status"] = detail.get("html_fallback_status") or ""
     merged["suspected_region_restricted"] = detail.get("suspected_region_restricted") or ""
     merged["steam_data_status"] = detail.get("steam_data_status") or normalized.get("data_status") or ""
+    if detail.get("source_notes"):
+        merged["source_notes"] = append_note_text(merged.get("source_notes"), detail.get("source_notes"))
     merged["feed_cache_status"] = feed_cache_status
     merged["last_detail_fetched_at"] = detail.get("checked_at") or ""
+    merged["enriched_at"] = detail.get("checked_at") or merged.get("enriched_at") or ""
+    merged["release_status"] = (
+        detail.get("release_status")
+        or detail.get("release_date")
+        or merged.get("release_status")
+        or merged.get("release_date")
+    )
+    merged["genres_tags"] = merged.get("genres") or detail.get("genres_text") or merged.get("genres_tags") or "未获取"
     release_raw = detail.get("release_date_raw") if isinstance(detail.get("release_date_raw"), dict) else {}
     if release_raw:
         merged["release_coming_soon"] = bool(release_raw.get("coming_soon"))
@@ -9173,6 +9659,9 @@ def merge_review_stats_into_home_card(card: dict, reviews: dict) -> dict:
         "review_stats_status",
     ]:
         merged[key] = normalized.get(key)
+    if reviews.get("success"):
+        merged["review_count"] = reviews.get("review_total")
+        merged["review_score"] = reviews.get("review_score")
     merged["review_cache_status"] = reviews.get("cache_status", "")
     return merged
 
@@ -9994,6 +10483,7 @@ def steam_store_item_to_card(item: SteamStoreFeedItem) -> dict:
         "search_source_filter": item.source_filter,
         "feed_fetched_at": item.fetched_at,
         "feed_updated_at": item.fetched_at,
+        "source_time": item.fetched_at,
         "feed_cache_status": "feed_cache",
         "source_url": item.steam_url,
         "steam_url": item.steam_url,
